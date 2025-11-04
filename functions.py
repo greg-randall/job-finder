@@ -886,6 +886,21 @@ async def _extract_job_links(
         List of job link URLs.
     """
     try:
+        # Wait for job listings to appear (Workday loads content dynamically)
+        if logger:
+            logger.debug(f"Waiting for job listings to load with selector: {job_link_selector}")
+
+        try:
+            await page.wait_for_selector(job_link_selector, timeout=30000)
+            if logger:
+                logger.debug("Job listings loaded successfully")
+        except Exception as wait_error:
+            if logger:
+                logger.warning(f"Timeout waiting for job listings: {str(wait_error)}")
+            else:
+                print(f"Warning: Timeout waiting for selector {job_link_selector}")
+
+        # Extract links even if wait timed out (might still be some content)
         links = await page.evaluate(f'''() => {{
             const elements = document.querySelectorAll('{job_link_selector}');
             return Array.from(elements).map(el => el.href);
