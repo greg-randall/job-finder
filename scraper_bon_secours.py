@@ -3,6 +3,7 @@
 import asyncio
 
 from functions import init_browser, navigate_with_retries, wait_for_load, download_all_links
+from logging_config import get_logger
 
 
 NAME = "bon-secours"
@@ -12,15 +13,23 @@ URL = ("https://careers.bonsecours.com/us/en/search-results?"
 
 async def main():
     """Scrapes the Bon Secours job board."""
+    # Initialize logger
+    logger = get_logger("bon_secours")
+
+    logger.info("Starting Bon Secours Scraper")
+    logger.add_breadcrumb("Initializing browser")
+
     page = await init_browser(headless=True)
 
+    logger.add_breadcrumb("Navigating to job board")
     success = await navigate_with_retries(page, URL)
     if not success:
-        print("Failed to load the page")
+        logger.error("Failed to load the page")
         return
 
     try:
         await page.wait_for_timeout(2000)
+        logger.add_breadcrumb("Selecting Richmond location filter")
         checked = await page.evaluate('''() => {
             const checkbox = document.querySelector('input[data-ph-at-text="Richmond"]');
             if (checkbox) {
@@ -33,17 +42,18 @@ async def main():
 
         if checked:
             await wait_for_load(page)
-            print("Selected Richmond location filter using JavaScript")
+            logger.info("Selected Richmond location filter using JavaScript")
         else:
-            print("Could not find Richmond checkbox")
+            logger.error("Could not find Richmond checkbox")
             return
     except Exception as e:
-        print(f"Error selecting Richmond location: {str(e)}")
+        logger.error(f"Error selecting Richmond location: {str(e)}")
         return
 
     all_job_links = set()
     page_num = 1
 
+    logger.add_breadcrumb("Starting pagination through job listings")
     while True:
         job_links = await page.evaluate('''() => {
             const elements = document.querySelectorAll('[ph-tevent="job_click"]');
@@ -51,29 +61,37 @@ async def main():
         }''')
 
         all_job_links.update(job_links)
-        print(f"Page {page_num}: Found {len(job_links)} job links")
+        logger.info(f"Page {page_num}: Found {len(job_links)} job links")
 
         next_button = await page.query_selector('a.next-btn')
         if not next_button:
-            print("No more next button found - reached last page")
+            logger.info("No more next button found - reached last page")
             break
 
         try:
             await next_button.click()
         except Exception:
-            print("Could not click next button - reached last page")
+            logger.info("Could not click next button - reached last page")
             break
         await wait_for_load(page)
         page_num += 1
 
-    print(f"\nTotal unique job links found across {page_num} pages: {len(all_job_links)}")
+    logger.info(f"Total unique job links found across {page_num} pages: {len(all_job_links)}")
+    logger.increment_stat("total_jobs_found", len(all_job_links))
+    logger.increment_stat("pages_scraped", page_num)
 
     all_job_links_list = list(all_job_links)
 
-    print("\nStarting download of job postings...")
+    logger.add_breadcrumb("Starting job download")
+    logger.info("Starting download of job postings...")
     await download_all_links(all_job_links_list, page, NAME)
 
     await page.context.close()
+
+    # Write summary
+    duration = logger.write_summary()
+    logger.info("Completed Bon Secours job board scraping")
+    logger.info(f"Summary saved to: {duration}")
 
 
 if __name__ == "__main__":
