@@ -1047,6 +1047,32 @@ async def scrape_site(
         else:
             print("✅ Successfully loaded job board")
 
+        # Wait for React/SPA to render content (Workday-specific)
+        if logger:
+            logger.debug("Waiting for React app to render content...")
+        else:
+            print("⏳ Waiting for React app to render content...")
+
+        # Wait for the root div to have children (React has rendered)
+        try:
+            await page.wait_for_function(
+                '''() => {
+                    const root = document.getElementById('root');
+                    return root && root.children.length > 0;
+                }''',
+                timeout=30000
+            )
+            if logger:
+                logger.debug("React app rendered successfully")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Timeout waiting for React app to render: {str(e)}")
+            else:
+                print(f"⚠️  Warning: React app may not have rendered completely")
+
+        # Additional wait for dynamic content to settle
+        await page.wait_for_timeout(3000)
+
         all_job_links: List[str] = []
         page_num = 1
 
