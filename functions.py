@@ -887,7 +887,7 @@ async def _extract_job_links(
     """
     try:
         links = await page.evaluate(f'''() => {{
-            const elements = document.querySelectorAll("{job_link_selector}");
+            const elements = document.querySelectorAll('{job_link_selector}');
             return Array.from(elements).map(el => el.href);
         }}''')
 
