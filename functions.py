@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import os
 import secrets
+import traceback
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -23,6 +24,8 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+
+from logging_config import ScraperLogger, setup_simple_logger
 
 # Load environment variables
 load_dotenv()
@@ -522,18 +525,23 @@ def make_absolute_url(base_url: str, relative_url: Optional[str]) -> Optional[st
 # NAVIGATION FUNCTIONS
 # ============================================================================
 
-async def _try_lynx_fallback(url: str, page: Page) -> bool:
+async def _try_lynx_fallback(url: str, page: Page, logger: Optional[ScraperLogger] = None) -> bool:
     """
     Try using lynx as a last resort fallback.
 
     Args:
         url: URL to fetch.
         page: Playwright page to set content on.
+        logger: Optional logger for structured logging.
 
     Returns:
         True if successful, False otherwise.
     """
-    print("Selenium fallback failed, trying lynx...")
+    if logger:
+        logger.warning("Selenium fallback failed, trying lynx...")
+    else:
+        print("Selenium fallback failed, trying lynx...")
+
     try:
         process = await asyncio.create_subprocess_exec(
             'lynx', '-source', url,
@@ -545,22 +553,32 @@ async def _try_lynx_fallback(url: str, page: Page) -> bool:
             await page.set_content(stdout.decode())
             return True
 
-        print("Lynx fallback also failed")
+        if logger:
+            logger.warning("Lynx fallback also failed")
+        else:
+            print("Lynx fallback also failed")
         return False
 
     except FileNotFoundError:
-        print("Lynx is not installed, skipping.")
+        if logger:
+            logger.debug("Lynx is not installed, skipping.")
+        else:
+            print("Lynx is not installed, skipping.")
         return False
 
     except Exception as e:
-        print(f"Lynx fallback error: {str(e)}")
+        if logger:
+            logger.error(f"Lynx fallback error: {str(e)}")
+        else:
+            print(f"Lynx fallback error: {str(e)}")
         return False
 
 
 async def navigate_with_retries(
     page: Page,
     url: str,
-    max_retries: int = Limits.MAX_RETRIES
+    max_retries: int = Limits.MAX_RETRIES,
+    logger: Optional[ScraperLogger] = None
 ) -> bool:
     """
     Navigate to a URL with retry logic and Selenium fallback.
@@ -569,6 +587,7 @@ async def navigate_with_retries(
         page: Playwright page object.
         url: URL to navigate to.
         max_retries: Maximum number of retry attempts.
+        logger: Optional logger for structured logging.
 
     Returns:
         True if navigation succeeded, False otherwise.
@@ -576,30 +595,65 @@ async def navigate_with_retries(
     if not url:
         raise ValueError("URL cannot be empty")
 
+    last_error = None
     for retry_count in range(1, max_retries + 1):
         try:
+            if logger:
+                logger.debug(f"Navigation attempt {retry_count}/{max_retries} to {url}")
             await page.goto(url, timeout=Timeouts.PAGE_LOAD)
             await page.wait_for_load_state('networkidle', timeout=Timeouts.NETWORK_IDLE)
+            if logger:
+                logger.debug(f"Successfully navigated to {url}")
             return True
 
         except Exception as e:
-            print(f"Attempt {retry_count}: Error loading page: {str(e)}")
+            last_error = e
+            if logger:
+                logger.warning(f"Attempt {retry_count}/{max_retries}: Error loading {url}: {str(e)}")
+            else:
+                print(f"Attempt {retry_count}: Error loading page: {str(e)}")
 
             if retry_count == max_retries:
                 # Try Selenium fallback
-                print("Playwright failed, attempting Selenium fallback...")
+                if logger:
+                    logger.warning("Playwright failed all retries, attempting Selenium fallback...")
+                else:
+                    print("Playwright failed, attempting Selenium fallback...")
+
                 try:
                     content = await get_html_with_selenium(url)
                     if content:
                         await page.set_content(content)
+                        if logger:
+                            logger.info("Selenium fallback successful")
                         return True
                 except Exception as se:
-                    print(f"Selenium fallback error: {str(se)}")
+                    if logger:
+                        logger.error(f"Selenium fallback failed: {str(se)}")
+                    else:
+                        print(f"Selenium fallback error: {str(se)}")
 
                 # Try lynx as last resort
-                if await _try_lynx_fallback(url, page):
+                if await _try_lynx_fallback(url, page, logger):
+                    if logger:
+                        logger.info("Lynx fallback successful")
                     return True
 
+                # All methods failed - capture error context
+                if logger:
+                    await logger.capture_error_context(
+                        error_type="NavigationError",
+                        error_message=f"Failed to navigate to {url} after {max_retries} retries and all fallbacks",
+                        url=url,
+                        page=page,
+                        stack_trace=traceback.format_exc(),
+                        context={
+                            "max_retries": max_retries,
+                            "last_error": str(last_error),
+                            "attempted_methods": ["playwright", "selenium", "lynx"],
+                            "timeout_ms": Timeouts.PAGE_LOAD
+                        }
+                    )
                 return False
 
             # Wait before retry
@@ -649,7 +703,8 @@ async def _download_single_link(
     name: str,
     stats: DownloadStats,
     processed_urls: Set[str],
-    sleep_time: int = 0
+    sleep_time: int = 0,
+    logger: Optional[ScraperLogger] = None
 ) -> bool:
     """
     Download content from a single URL.
@@ -661,6 +716,7 @@ async def _download_single_link(
         stats: Download statistics object.
         processed_urls: Set of already processed URLs.
         sleep_time: Optional sleep time between requests.
+        logger: Optional logger for structured logging.
 
     Returns:
         True if successful, False if error occurred.
@@ -668,22 +724,29 @@ async def _download_single_link(
     # Check if already processed in this session
     if url in processed_urls:
         stats.skipped_session += 1
+        if logger:
+            logger.debug(f"Skipped (already processed): {url}")
         return True
 
     # Check if file already exists
     filepath = _generate_cache_filename(name, url)
     if filepath.exists():
         stats.skipped_existing += 1
+        if logger:
+            logger.debug(f"Skipped (cached): {url}")
         return True
 
     try:
         # Navigate to the page
         try:
-            await navigate_with_retries(page, url)
+            await navigate_with_retries(page, url, logger=logger)
             await wait_for_load(page)
             content = await page.content()
         except Exception as nav_error:
-            print(f"Navigation error for {url}: {str(nav_error)}")
+            if logger:
+                logger.error(f"Navigation error for {url}: {str(nav_error)}")
+            else:
+                print(f"Navigation error for {url}: {str(nav_error)}")
             return False
 
         # Extract clean text using trafilatura
@@ -696,18 +759,27 @@ async def _download_single_link(
             await f.write(content)
 
         stats.processed += 1
-        print(f"Downloaded {stats.processed}/{stats.total}: {url}")
+        if logger:
+            logger.debug(f"Downloaded {stats.processed}/{stats.total}: {url}")
+        else:
+            print(f"Downloaded {stats.processed}/{stats.total}: {url}")
         processed_urls.add(url)
 
         # Sleep if requested (using async sleep)
         if sleep_time > 0:
-            print(f"Extra Sleep Requested {sleep_time} seconds.")
+            if logger:
+                logger.debug(f"Sleeping {sleep_time} seconds...")
+            else:
+                print(f"Extra Sleep Requested {sleep_time} seconds.")
             await asyncio.sleep(sleep_time)
 
         return True
 
     except Exception as e:
-        print(f"Error downloading {url}: {str(e)}")
+        if logger:
+            logger.error(f"Error downloading {url}: {str(e)}")
+        else:
+            print(f"Error downloading {url}: {str(e)}")
         stats.errors += 1
         return False
 
@@ -716,7 +788,8 @@ async def download_all_links(
     links: List[str],
     page: Page,
     name: str,
-    sleep: int = 0
+    sleep: int = 0,
+    logger: Optional[ScraperLogger] = None
 ) -> DownloadStats:
     """
     Downloads content from all provided URLs and saves them to a cache folder.
@@ -726,6 +799,7 @@ async def download_all_links(
         page: Playwright page object.
         name: Name prefix for saved files.
         sleep: Optional sleep time between requests in seconds.
+        logger: Optional logger for structured logging.
 
     Returns:
         DownloadStats object with download statistics.
@@ -750,7 +824,7 @@ async def download_all_links(
 
     for url in links_list:
         success = await _download_single_link(
-            url, page, name, stats, processed_urls, sleep
+            url, page, name, stats, processed_urls, sleep, logger
         )
 
         if success:
@@ -758,22 +832,35 @@ async def download_all_links(
         else:
             consecutive_errors += 1
             wait_time = 2 ** consecutive_errors
-            print(f"Consecutive errors: {consecutive_errors}")
+
+            if logger:
+                logger.warning(f"Consecutive errors: {consecutive_errors}, wait time: {wait_time}s")
+            else:
+                print(f"Consecutive errors: {consecutive_errors}")
 
             if consecutive_errors >= Limits.MAX_CONSECUTIVE_ERRORS:
-                print(f"Exiting after {consecutive_errors} consecutive errors")
+                if logger:
+                    logger.error(f"Exiting after {consecutive_errors} consecutive errors")
+                else:
+                    print(f"Exiting after {consecutive_errors} consecutive errors")
                 break
 
-            print(f"Waiting {wait_time} seconds before next attempt...")
+            if not logger:
+                print(f"Waiting {wait_time} seconds before next attempt...")
             await asyncio.sleep(wait_time)
 
     # Print summary
-    if stats.total_skipped > 0:
-        print(f"\nSkipped {stats.total_skipped} of {stats.total} total links:")
-        if stats.skipped_session > 0:
-            print(f"- {stats.skipped_session} already processed in this session")
-        if stats.skipped_existing > 0:
-            print(f"- {stats.skipped_existing} already existed in cache")
+    if logger:
+        logger.info(f"Download complete: {stats.processed} processed, {stats.total_skipped} skipped, {stats.errors} errors")
+        logger.increment_stat("total_jobs_downloaded", stats.processed)
+        logger.increment_stat("total_jobs_skipped", stats.total_skipped)
+    else:
+        if stats.total_skipped > 0:
+            print(f"\nSkipped {stats.total_skipped} of {stats.total} total links:")
+            if stats.skipped_session > 0:
+                print(f"- {stats.skipped_session} already processed in this session")
+            if stats.skipped_existing > 0:
+                print(f"- {stats.skipped_existing} already existed in cache")
 
     return stats
 
@@ -782,27 +869,69 @@ async def download_all_links(
 # MAIN SCRAPING FUNCTION
 # ============================================================================
 
-async def _extract_job_links(page: Page, job_link_selector: str) -> List[str]:
+async def _extract_job_links(
+    page: Page,
+    job_link_selector: str,
+    logger: Optional[ScraperLogger] = None
+) -> List[str]:
     """
     Extract job links from the current page.
 
     Args:
         page: Playwright page object.
         job_link_selector: CSS selector for job links.
+        logger: Optional logger for structured logging.
 
     Returns:
         List of job link URLs.
     """
-    return await page.evaluate(f'''() => {{
-        const elements = document.querySelectorAll("{job_link_selector}");
-        return Array.from(elements).map(el => el.href);
-    }}''')
+    try:
+        links = await page.evaluate(f'''() => {{
+            const elements = document.querySelectorAll("{job_link_selector}");
+            return Array.from(elements).map(el => el.href);
+        }}''')
+
+        if logger:
+            logger.debug(f"Extracted {len(links)} job links using selector: {job_link_selector}")
+
+        if not links and logger:
+            # Selector didn't match anything - capture error context
+            await logger.capture_error_context(
+                error_type="SelectorError",
+                error_message=f"Job link selector '{job_link_selector}' returned no results",
+                url=page.url,
+                page=page,
+                context={
+                    "selector": job_link_selector,
+                    "page_url": page.url,
+                    "selector_type": "job_links"
+                }
+            )
+
+        return links
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Error extracting job links: {str(e)}")
+            await logger.capture_error_context(
+                error_type="SelectorError",
+                error_message=f"Failed to extract job links with selector '{job_link_selector}'",
+                url=page.url,
+                page=page,
+                stack_trace=traceback.format_exc(),
+                context={
+                    "selector": job_link_selector,
+                    "error": str(e)
+                }
+            )
+        raise
 
 
 async def _navigate_to_next_page(
     page: Page,
     next_page_selector: str,
-    next_page_disabled_selector: str
+    next_page_disabled_selector: str,
+    logger: Optional[ScraperLogger] = None
 ) -> bool:
     """
     Navigate to the next page of results.
@@ -811,6 +940,7 @@ async def _navigate_to_next_page(
         page: Playwright page object.
         next_page_selector: CSS selector for next page button.
         next_page_disabled_selector: CSS selector for disabled next page button.
+        logger: Optional logger for structured logging.
 
     Returns:
         True if navigation succeeded, False if on last page.
@@ -818,13 +948,19 @@ async def _navigate_to_next_page(
     # Check if on last page
     next_button_disabled = await page.query_selector(next_page_disabled_selector)
     if next_button_disabled:
-        print("🏁 Reached last page - next button is disabled")
+        if logger:
+            logger.info("Reached last page - next button is disabled")
+        else:
+            print("🏁 Reached last page - next button is disabled")
         return False
 
     # Find and click next button
     next_button = await page.query_selector(next_page_selector)
     if not next_button:
-        print("No more next button found")
+        if logger:
+            logger.info("No more next button found")
+        else:
+            print("No more next button found")
         return False
 
     await next_button.click()
@@ -838,7 +974,8 @@ async def scrape_site(
     job_link_selector: str,
     next_page_selector: str,
     next_page_disabled_selector: str,
-    headless: bool = True
+    headless: bool = True,
+    logger: Optional[ScraperLogger] = None
 ) -> None:
     """
     Scrapes a job board site for job postings.
@@ -850,6 +987,7 @@ async def scrape_site(
         next_page_selector: The CSS selector for the next page button.
         next_page_disabled_selector: The CSS selector for the disabled next page button.
         headless: Whether to run the browser in headless mode.
+        logger: Optional logger for structured logging.
 
     Raises:
         BrowserInitializationError: If browser initialization fails.
@@ -862,55 +1000,96 @@ async def scrape_site(
     if not job_link_selector:
         raise ValueError("Job link selector cannot be empty")
 
-    print(f"\n{'='*80}")
-    print(f"Starting to scrape: {name}")
-    print(f"URL: {url}")
-    print(f"{'='*80}\n")
+    if logger:
+        logger.info(f"Starting to scrape: {name}")
+        logger.info(f"URL: {url}")
+        logger.add_breadcrumb(f"Started scraping {name} at {url}")
+    else:
+        print(f"\n{'='*80}")
+        print(f"Starting to scrape: {name}")
+        print(f"URL: {url}")
+        print(f"{'='*80}\n")
 
-    print("Initializing browser...")
+    if logger:
+        logger.debug("Initializing browser...")
+    else:
+        print("Initializing browser...")
+
     page, playwright, browser = await init_browser(headless=headless)
 
     try:
-        print("Attempting to navigate to job board...")
-        success = await navigate_with_retries(page, url)
+        if logger:
+            logger.info("Attempting to navigate to job board...")
+        else:
+            print("Attempting to navigate to job board...")
+
+        success = await navigate_with_retries(page, url, logger=logger)
         if not success:
             raise NavigationError(f"Failed to load the page: {url}")
-        print("✅ Successfully loaded job board")
+
+        if logger:
+            logger.info("Successfully loaded job board")
+        else:
+            print("✅ Successfully loaded job board")
 
         all_job_links: List[str] = []
         page_num = 1
 
         # Scrape all pages
         while True:
-            job_links = await _extract_job_links(page, job_link_selector)
+            job_links = await _extract_job_links(page, job_link_selector, logger)
             all_job_links.extend(job_links)
-            print(f"📄 Page {page_num}: Found {len(job_links)} job links")
+
+            if logger:
+                logger.info(f"Page {page_num}: Found {len(job_links)} job links")
+            else:
+                print(f"📄 Page {page_num}: Found {len(job_links)} job links")
 
             # Try to navigate to next page
-            if not await _navigate_to_next_page(page, next_page_selector, next_page_disabled_selector):
+            if not await _navigate_to_next_page(page, next_page_selector, next_page_disabled_selector, logger):
                 break
 
             page_num += 1
 
         # Print summary
-        print(f"\n📊 Summary for {name}:")
-        print(f"- Total pages scraped: {page_num}")
-        print(f"- Total job links found: {len(all_job_links)}")
+        if logger:
+            logger.info(f"Summary for {name}: {page_num} pages scraped, {len(all_job_links)} job links found")
+            logger.increment_stat("total_jobs_found", len(all_job_links))
+        else:
+            print(f"\n📊 Summary for {name}:")
+            print(f"- Total pages scraped: {page_num}")
+            print(f"- Total job links found: {len(all_job_links)}")
 
         # Download all job postings
-        print("\n⬇️ Starting download of job postings...")
-        await download_all_links(all_job_links, page, name)
+        if logger:
+            logger.info("Starting download of job postings...")
+        else:
+            print("\n⬇️ Starting download of job postings...")
+
+        await download_all_links(all_job_links, page, name, logger=logger)
 
     except Exception as e:
-        print(f"❌ Error processing {url}: {str(e)}")
+        if logger:
+            logger.error(f"Error processing {url}: {str(e)}")
+        else:
+            print(f"❌ Error processing {url}: {str(e)}")
         raise
 
     finally:
-        print("🧹 Cleaning up browser resources...")
+        if logger:
+            logger.debug("Cleaning up browser resources...")
+        else:
+            print("🧹 Cleaning up browser resources...")
+
         try:
             await page.context.close()
             await browser.close()
             await playwright.stop()
         except Exception as e:
-            print(f"Error during cleanup: {str(e)}")
-        print(f"\n{'='*80}")
+            if logger:
+                logger.warning(f"Error during cleanup: {str(e)}")
+            else:
+                print(f"Error during cleanup: {str(e)}")
+
+        if not logger:
+            print(f"\n{'='*80}")

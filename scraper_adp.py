@@ -3,11 +3,13 @@
 import asyncio
 import hashlib
 import os
+import traceback
 
 import aiofiles
 import trafilatura
 
 from functions import init_browser, navigate_with_retries, wait_for_load
+from logging_config import get_logger
 
 
 JOBS = [
@@ -18,40 +20,76 @@ JOBS = [
 ]
 
 
-async def scrape_adp_site(url):
+async def scrape_adp_site(url, logger=None):
     """Scrapes a single ADP job board."""
     name = url.split('cid=')[1][:8]
 
-    print(f"\n{'='*80}")
-    print(f"Starting to scrape: {name}")
-    print(f"URL: {url}")
-    print(f"{'='*80}\n")
+    if logger:
+        logger.info(f"Starting to scrape: {name}")
+        logger.info(f"URL: {url}")
+        logger.add_breadcrumb(f"Started scraping ADP site {name}")
+    else:
+        print(f"\n{'='*80}")
+        print(f"Starting to scrape: {name}")
+        print(f"URL: {url}")
+        print(f"{'='*80}\n")
 
-    print("Initializing browser...")
-    page = await init_browser(headless=True)
+    if logger:
+        logger.debug("Initializing browser...")
+    else:
+        print("Initializing browser...")
+
+    page, playwright, browser = await init_browser(headless=True)
 
     try:
-        print("Attempting to navigate to job board...")
-        success = await navigate_with_retries(page, url)
+        if logger:
+            logger.info("Attempting to navigate to job board...")
+        else:
+            print("Attempting to navigate to job board...")
+
+        success = await navigate_with_retries(page, url, logger=logger)
         if not success:
-            print(f"❌ Failed to load the page: {url}")
+            if logger:
+                logger.error(f"Failed to load the page: {url}")
+            else:
+                print(f"❌ Failed to load the page: {url}")
             return
-        print("✅ Successfully loaded job board")
+
+        if logger:
+            logger.info("Successfully loaded job board")
+        else:
+            print("✅ Successfully loaded job board")
 
         await wait_for_load(page)
 
         try:
-            print("Looking for 'View all' button...")
+            if logger:
+                logger.debug("Looking for 'View all' button...")
+            else:
+                print("Looking for 'View all' button...")
+
             view_all_button = await page.wait_for_selector('#recruitment_careerCenter_showAllJobs', timeout=5000)
             if view_all_button:
-                print("Found 'View all' button, clicking...")
+                if logger:
+                    logger.info("Found 'View all' button, clicking...")
+                else:
+                    print("Found 'View all' button, clicking...")
                 await view_all_button.click()
                 await wait_for_load(page)
-                print("✅ Clicked 'View all' button")
-        except TimeoutError:
-            print("Note: No 'View all' button found or error clicking it.")
+                if logger:
+                    logger.info("Clicked 'View all' button")
+                else:
+                    print("✅ Clicked 'View all' button")
+        except Exception as e:
+            if logger:
+                logger.warning(f"No 'View all' button found or error clicking it: {str(e)}")
+            else:
+                print("Note: No 'View all' button found or error clicking it.")
 
-        print("\nProcessing job listings...")
+        if logger:
+            logger.info("Processing job listings...")
+        else:
+            print("\nProcessing job listings...")
 
         cache_dir = 'cache'
         os.makedirs(cache_dir, exist_ok=True)
@@ -63,10 +101,26 @@ async def scrape_adp_site(url):
         job_buttons = await page.query_selector_all('sdf-button[id^="lblTitle_"]')
 
         if not job_buttons:
-            print("No job buttons found")
+            if logger:
+                logger.error("No job buttons found - capturing error context")
+                await logger.capture_error_context(
+                    error_type="SelectorError",
+                    error_message="No job buttons found with selector 'sdf-button[id^=\"lblTitle_\"]'",
+                    url=url,
+                    page=page,
+                    context={
+                        "selector": 'sdf-button[id^="lblTitle_"]',
+                        "selector_type": "job_buttons"
+                    }
+                )
+            else:
+                print("No job buttons found")
             return
 
-        print(f"Found {len(job_buttons)} job buttons")
+        if logger:
+            logger.info(f"Found {len(job_buttons)} job buttons")
+        else:
+            print(f"Found {len(job_buttons)} job buttons")
 
         button_ids = []
         for button in job_buttons:
@@ -160,28 +214,60 @@ async def scrape_adp_site(url):
                 except Exception:
                     pass
 
-        print("\n📊 Progress:")
-        print(f"- Jobs processed so far: {processed_count}")
+        if logger:
+            logger.info(f"Progress: Jobs processed: {processed_count}")
+            logger.increment_stat("total_jobs_found", processed_count)
+        else:
+            print("\n📊 Progress:")
+            print(f"- Jobs processed so far: {processed_count}")
 
     except Exception as e:
-        print(f"Error in main processing loop: {str(e)}")
+        if logger:
+            logger.error(f"Error in main processing loop: {str(e)}")
+        else:
+            print(f"Error in main processing loop: {str(e)}")
 
     finally:
-        print("🧹 Cleaning up browser resources...")
-        await page.context.close()
-        print(f"\n{'='*80}")
+        if logger:
+            logger.debug("Cleaning up browser resources...")
+        else:
+            print("🧹 Cleaning up browser resources...")
+
+        try:
+            await page.context.close()
+            await browser.close()
+            await playwright.stop()
+        except Exception as e:
+            if logger:
+                logger.warning(f"Error during cleanup: {str(e)}")
+
+        if not logger:
+            print(f"\n{'='*80}")
 
 
 async def main():
     """Scrapes all ADP job boards."""
+    # Initialize logger
+    logger = get_logger("adp")
     total_sites = len(JOBS)
-    print(f"\n🎯 Starting to scrape {total_sites} ADP job boards")
+
+    logger.info(f"Starting ADP Scraper ({total_sites} sites)")
 
     for index, url in enumerate(JOBS, 1):
-        print(f"\n🔄 Processing site {index}/{total_sites}")
-        await scrape_adp_site(url)
+        logger.info(f"Processing site {index}/{total_sites}")
+        logger.add_breadcrumb(f"Processing ADP site {index}/{total_sites}")
 
-    print("\n✨ Finished scraping all job boards!")
+        try:
+            await scrape_adp_site(url, logger)
+            logger.increment_stat("sites_processed")
+        except Exception as e:
+            logger.error(f"Failed to scrape ADP site: {str(e)}")
+            logger.increment_stat("sites_failed")
+
+    # Write summary
+    summary_path = logger.write_summary()
+    logger.info(f"Completed all {total_sites} ADP job boards")
+    logger.info(f"Summary saved to: {summary_path}")
 
 
 if __name__ == "__main__":
