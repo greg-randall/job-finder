@@ -6,6 +6,7 @@ import os
 import aiofiles
 
 from functions import init_browser, navigate_with_retries, download_all_links
+from logging_config import get_logger
 
 
 JOBS = [
@@ -16,25 +17,24 @@ JOBS = [
 ]
 
 
-async def scrape_icims_site(url):
+async def scrape_icims_site(url, logger):
     """Scrapes a single iCIMS job board."""
     name = url.split('.')[0].split('//')[1]
 
-    print(f"\n{'='*80}")
-    print(f"Starting to scrape: {name}")
-    print(f"URL: {url}")
-    print(f"{'='*80}\n")
+    logger.info(f"Starting to scrape: {name}")
+    logger.info(f"URL: {url}")
+    logger.add_breadcrumb(f"Scraping {name}")
 
-    print("Initializing browser...")
+    logger.add_breadcrumb("Initializing browser")
     page = await init_browser(headless=True)
 
     try:
-        print("Attempting to navigate to job board...")
+        logger.add_breadcrumb("Navigating to job board")
         success = await navigate_with_retries(page, url)
         if not success:
-            print(f"❌ Failed to load the page: {url}")
+            logger.error(f"Failed to load the page: {url}")
             return
-        print("✅ Successfully loaded job board")
+        logger.info("Successfully loaded job board")
 
         screenshot_dir = 'debug_screenshots'
         html_dir = 'debug_html'
@@ -43,22 +43,23 @@ async def scrape_icims_site(url):
 
         screenshot_path = os.path.join(screenshot_dir, f"{name}_page_load.png")
         await page.screenshot(path=screenshot_path, full_page=True)
-        print(f"📸 Saved full page screenshot to {screenshot_path}")
+        logger.info(f"Saved full page screenshot to {screenshot_path}")
 
         html_path = os.path.join(html_dir, f"{name}_page.html")
         html_content = await page.content()
         async with aiofiles.open(html_path, 'w', encoding='utf-8') as f:
             await f.write(html_content)
-        print(f"💾 Saved page HTML to {html_path}")
+        logger.info(f"Saved page HTML to {html_path}")
 
-        print("Looking for jobs iframe...")
+        logger.add_breadcrumb("Looking for jobs iframe")
         iframe = await page.wait_for_selector('iframe[id="icims_content_iframe"]')
         frame = await iframe.content_frame()
-        print("✅ Switched to jobs iframe")
+        logger.info("Switched to jobs iframe")
 
         all_job_links = []
         page_num = 1
 
+        logger.add_breadcrumb("Starting pagination")
         while True:
             await frame.wait_for_selector('.iCIMS_Anchor', state='visible')
 
@@ -71,11 +72,11 @@ async def scrape_icims_site(url):
             }''')
 
             all_job_links.extend(job_links)
-            print(f"📄 Page {page_num}: Found {len(job_links)} job links")
+            logger.info(f"Page {page_num}: Found {len(job_links)} job links")
 
             next_button = await frame.query_selector('a.iCIMS_Pagination_Bottom-next')
             if not next_button:
-                print("🏁 Reached last page - no next button found")
+                logger.info("Reached last page - no next button found")
                 break
 
             is_disabled = await next_button.evaluate('''(el) => {
@@ -89,7 +90,7 @@ async def scrape_icims_site(url):
             }''')
 
             if is_disabled:
-                print("🏁 Reached last page - next button is disabled")
+                logger.info("Reached last page - next button is disabled")
                 break
 
             await next_button.click()
@@ -97,32 +98,45 @@ async def scrape_icims_site(url):
             await frame.wait_for_selector('.iCIMS_Anchor', state='visible')
             page_num += 1
 
-        print(f"\n📊 Summary for {name}:")
-        print(f"- Total pages scraped: {page_num}")
-        print(f"- Total job links found: {len(all_job_links)}")
+        logger.info(f"Summary for {name}: {page_num} pages scraped, {len(all_job_links)} job links found")
+        logger.increment_stat("total_jobs_found", len(all_job_links))
+        logger.increment_stat("pages_scraped", page_num)
 
-        print("\n⬇️ Starting download of job postings...")
+        logger.add_breadcrumb("Starting job download")
+        logger.info("Starting download of job postings...")
         await download_all_links(all_job_links, page, name)
 
     except Exception as e:
-        print(f"❌ Error processing {url}: {str(e)}")
+        logger.error(f"Error processing {url}: {str(e)}")
 
     finally:
-        print("🧹 Cleaning up browser resources...")
+        logger.add_breadcrumb("Cleaning up browser")
         await page.context.close()
-        print(f"\n{'='*80}")
 
 
 async def main():
     """Scrapes all iCIMS job boards."""
+    # Initialize logger
+    logger = get_logger("icims")
     total_sites = len(JOBS)
-    print(f"\n🎯 Starting to scrape {total_sites} iCIMS job boards")
+
+    logger.info(f"Starting iCIMS Scraper ({total_sites} sites)")
 
     for index, url in enumerate(JOBS, 1):
-        print(f"\n🔄 Processing site {index}/{total_sites}")
-        await scrape_icims_site(url)
+        logger.info(f"Site {index}/{total_sites}")
+        logger.add_breadcrumb(f"Processing site {index}/{total_sites}")
 
-    print("\n✨ Finished scraping all job boards!")
+        try:
+            await scrape_icims_site(url, logger)
+            logger.increment_stat("sites_processed")
+        except Exception as e:
+            logger.error(f"Failed to scrape site {index}: {str(e)}")
+            logger.increment_stat("sites_failed")
+
+    # Write summary
+    duration = logger.write_summary()
+    logger.info(f"Completed all {total_sites} iCIMS job boards")
+    logger.info(f"Summary saved to: {duration}")
 
 
 if __name__ == "__main__":

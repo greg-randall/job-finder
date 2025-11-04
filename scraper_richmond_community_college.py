@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import aiohttp
 
 from functions import init_browser, download_all_links
+from logging_config import get_logger
 
 
 NAME = "richmond-community-college"
@@ -15,12 +16,20 @@ URL = ("https://jobs.vccs.edu/postings/search.atom?"
 
 async def main():
     """Scrapes the Richmond Community College job board."""
+    # Initialize logger
+    logger = get_logger("richmond_community_college")
+
+    logger.info("Starting Richmond Community College Scraper")
+    logger.add_breadcrumb("Initializing browser")
+
     page = await init_browser(headless=True)
 
+    logger.add_breadcrumb("Fetching XML feed")
     async with aiohttp.ClientSession() as session:
         async with session.get(URL) as response:
             xml_content = await response.text()
 
+    logger.add_breadcrumb("Parsing XML")
     root = ET.fromstring(xml_content)
 
     job_links = []
@@ -29,12 +38,19 @@ async def main():
         if link is not None and 'href' in link.attrib:
             job_links.append(link.attrib['href'])
 
-    print(f"Found {len(job_links)} job links in the XML feed")
+    logger.info(f"Found {len(job_links)} job links in the XML feed")
+    logger.increment_stat("total_jobs_found", len(job_links))
 
-    print("\nStarting download of job postings...")
+    logger.add_breadcrumb("Starting job download")
+    logger.info("Starting download of job postings...")
     await download_all_links(job_links, page, NAME)
 
     await page.context.close()
+
+    # Write summary
+    duration = logger.write_summary()
+    logger.info("Completed Richmond Community College job board scraping")
+    logger.info(f"Summary saved to: {duration}")
 
 
 if __name__ == "__main__":
