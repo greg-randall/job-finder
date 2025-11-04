@@ -1,0 +1,12 @@
+.aider*
+.env
+cache/
+debug_html/
+resume.md
+extra/
+.claude/
+*.txt
+*.sh
+__pycache__/
+debug_screenshots/
+*.csv
