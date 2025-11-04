@@ -3,6 +3,7 @@
 import asyncio
 
 from functions import scrape_site
+from logging_config import get_logger
 
 
 JOBS = ["https://bbinsurance.wd1.myworkdayjobs.com/en-US/Careers",
@@ -28,19 +29,33 @@ JOBS = ["https://bbinsurance.wd1.myworkdayjobs.com/en-US/Careers",
 
 async def main():
     """Scrapes all Workday job boards."""
+    # Initialize logger
+    logger = get_logger("workday")
     total_sites = len(JOBS)
-    print(f"\n🎯 Starting to scrape {total_sites} Workday job boards")
+
+    logger.info(f"Starting Workday Scraper ({total_sites} sites)")
 
     for index, url in enumerate(JOBS, 1):
         name = url.split('.')[0].split('//')[1]
-        print(f"\n🔄 Processing site {index}/{total_sites}: {name}")
-        await scrape_site(
-            url, name, '[data-automation-id="jobTitle"]',
-            '[data-uxi-widget-type="stepToNextButton"]:not([disabled])',
-            '[data-uxi-widget-type="stepToNextButton"][disabled]'
-        )
+        logger.info(f"Site {index}/{total_sites}: {name}")
+        logger.add_breadcrumb(f"Processing {name} ({index}/{total_sites})")
 
-    print("\n✨ Finished scraping all job boards!")
+        try:
+            await scrape_site(
+                url, name, '[data-automation-id="jobTitle"]',
+                '[data-uxi-widget-type="stepToNextButton"]:not([disabled])',
+                '[data-uxi-widget-type="stepToNextButton"][disabled]',
+                logger=logger
+            )
+            logger.increment_stat("sites_processed")
+        except Exception as e:
+            logger.error(f"Failed to scrape {name}: {str(e)}")
+            logger.increment_stat("sites_failed")
+
+    # Write summary
+    duration = logger.write_summary()
+    logger.info(f"Completed all {total_sites} Workday job boards")
+    logger.info(f"Summary saved to: {duration}")
 
 
 if __name__ == "__main__":
