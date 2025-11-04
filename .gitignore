@@ -10,3 +10,4 @@ extra/
 __pycache__/
 debug_screenshots/
 *.csv
+logs/
