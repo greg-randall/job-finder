@@ -1,0 +1,73 @@
+# Configuration for Job Board Discovery
+# This file defines keywords used to search for job boards via search engines
+
+# Search engine configuration
+search_engine:
+  base_url: "https://leta.mullvad.net/search"
+  engine: "brave"  # Search engine to use
+  rate_limit:
+    min_delay_seconds: 5  # Minimum seconds between requests
+    retry_delay_seconds: 60  # Seconds to wait on 429 error
+    max_retries: 3  # Max retries for 429 errors
+
+# Keywords for job-related terms
+job_keywords:
+  - "career"
+  - "jobs"
+  - "employment"
+  - "hiring"
+  - "opportunities"
+  - "openings"
+  - "positions"
+
+# Keywords for industries/roles
+industry_keywords:
+  - "real estate"
+  - "web developer"
+  - "plumber"
+  - "electrician"
+  - "construction"
+  - "healthcare"
+  - "nursing"
+  - "accounting"
+  - "engineer"
+  - "sales"
+  - "marketing"
+  - "IT"
+  - "teacher"
+  - "hospitality"
+
+# Optional: Location keywords (can be added to searches)
+location_keywords:
+  - "richmond"
+  - "virginia"
+  - "remote"
+  # Add more locations as needed
+
+# Big job boards to exclude from results
+excluded_domains:
+  - "indeed.com"
+  - "linkedin.com"
+  - "ziprecruiter.com"
+  - "monster.com"
+  - "glassdoor.com"
+  - "careerbuilder.com"
+  - "simplyhired.com"
+  - "snagajob.com"
+  - "jobs.com"
+  - "joblist.com"
+  - "talent.com"
+  - "jooble.org"
+  - "jobtome.com"
+  - "neuvoo.com"
+
+# Scraping settings
+scraping:
+  max_results_per_query: 20  # Max result pages to scrape per query
+  results_per_page: 10  # Approximate results per search page
+  follow_links: false  # Whether to visit each result link (slower but more data)
+
+# Output settings
+output:
+  file_path: "discovered_job_boards.json"  # Where to save discovered boards
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
