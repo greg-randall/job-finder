@@ -8,6 +8,7 @@ It aggregates error information and artifacts into a single issue per scraper.
 
 import json
 import subprocess
+import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -236,6 +237,8 @@ class GitHubIssueHandler:
         """
         Collect one example of each error artifact type for a scraper.
 
+        Filters artifacts by scraper name by reading JSON files and checking the 'scraper' field.
+
         Args:
             scraper_name: Name of the scraper
 
@@ -252,27 +255,52 @@ class GitHubIssueHandler:
             self.logger.warning(f"Error directory does not exist: {self.error_dir}")
             return artifacts
 
-        # Get all error files sorted by modification time (most recent first)
-        error_files = sorted(
-            self.error_dir.glob("*"),
+        # Get all JSON error files sorted by modification time (most recent first)
+        json_files = sorted(
+            self.error_dir.glob("*.json"),
             key=lambda p: p.stat().st_mtime,
             reverse=True
         )
 
-        # Find one of each type
-        for file_path in error_files:
-            if file_path.suffix == '.json' and artifacts['json'] is None:
-                artifacts['json'] = file_path
-            elif file_path.suffix == '.png' and artifacts['screenshot'] is None:
-                artifacts['screenshot'] = file_path
-            elif file_path.suffix == '.html' and artifacts['html'] is None:
-                artifacts['html'] = file_path
+        # Find the most recent JSON file for this scraper
+        for json_file in json_files:
+            try:
+                with open(json_file, 'r') as f:
+                    error_data = json.load(f)
 
-            # Stop if we have all three
-            if all(artifacts.values()):
-                break
+                # Check if this error belongs to our scraper
+                if error_data.get('scraper') == scraper_name:
+                    artifacts['json'] = json_file
 
-        self.logger.debug(f"Collected artifacts: {artifacts}")
+                    # Extract timestamp prefix from JSON filename
+                    # Format: YYYY-MM-DD_HHMMSS_mmm_errortype.json
+                    # We want: YYYY-MM-DD_HHMMSS_mmm
+                    filename = json_file.stem  # filename without .json
+                    parts = filename.rsplit('_', 1)  # Split off the error type
+                    if len(parts) == 2:
+                        timestamp_prefix = parts[0]
+
+                        # Look for corresponding HTML and screenshot with same timestamp
+                        html_file = self.error_dir / f"{timestamp_prefix}_page_dump.html"
+                        if html_file.exists():
+                            artifacts['html'] = html_file
+
+                        screenshot_file = self.error_dir / f"{timestamp_prefix}_screenshot.png"
+                        if screenshot_file.exists():
+                            artifacts['screenshot'] = screenshot_file
+
+                    # Found matching scraper, stop searching
+                    break
+
+            except (json.JSONDecodeError, IOError) as e:
+                self.logger.warning(f"Could not read JSON file {json_file}: {e}")
+                continue
+
+        if artifacts['json']:
+            self.logger.debug(f"Collected artifacts for {scraper_name}: {artifacts}")
+        else:
+            self.logger.warning(f"No error artifacts found for scraper: {scraper_name}")
+
         return artifacts
 
     def format_issue_body(
@@ -346,6 +374,37 @@ class GitHubIssueHandler:
             except Exception as e:
                 self.logger.warning(f"Could not load error JSON: {e}")
 
+        # Screenshot
+        if artifacts.get('screenshot'):
+            try:
+                screenshot_path = artifacts['screenshot']
+                file_size = screenshot_path.stat().st_size
+
+                # Only embed screenshot if it's reasonably sized (< 500KB)
+                # Base64 encoding increases size by ~33%, and GitHub has 65KB issue body limit
+                # But we can use img tags which don't count against the limit the same way
+                max_screenshot_size = 500 * 1024  # 500KB
+
+                if file_size <= max_screenshot_size:
+                    with open(screenshot_path, 'rb') as f:
+                        screenshot_data = f.read()
+                        screenshot_b64 = base64.b64encode(screenshot_data).decode('utf-8')
+
+                    body += f"### Screenshot\n\n"
+                    body += f"<details>\n"
+                    body += f"<summary>Click to view screenshot from <code>{screenshot_path.name}</code></summary>\n\n"
+                    body += f'<img src="data:image/png;base64,{screenshot_b64}" alt="Screenshot" />\n\n'
+                    body += f"</details>\n\n"
+                else:
+                    body += f"### Screenshot\n\n"
+                    body += f"⚠️ Screenshot is too large to embed ({file_size / 1024:.1f} KB)\n"
+                    body += f"File: `{screenshot_path.name}` (stored locally)\n\n"
+
+            except Exception as e:
+                self.logger.warning(f"Could not load screenshot file: {e}")
+                body += f"### Screenshot\n\n"
+                body += f"❌ Could not load screenshot file: {e}\n\n"
+
         # HTML Content
         if artifacts.get('html'):
             try:
@@ -353,7 +412,7 @@ class GitHubIssueHandler:
                     html_content = f.read()
 
                 # Truncate if too large (GitHub has limits around 65KB for issue bodies)
-                max_html_length = 50000
+                max_html_length = 30000  # Reduced to leave room for screenshot
                 if len(html_content) > max_html_length:
                     html_content = html_content[:max_html_length] + "\n\n... (truncated)"
 
@@ -372,12 +431,16 @@ class GitHubIssueHandler:
         body += f"The following debug artifacts have been generated:\n\n"
 
         if artifacts.get('json'):
-            body += f"- ✅ Error context JSON: `{artifacts['json'].name}`\n"
+            body += f"- ✅ Error context JSON: `{artifacts['json'].name}` (details included above)\n"
         else:
             body += f"- ❌ Error context JSON: Not available\n"
 
         if artifacts.get('screenshot'):
-            body += f"- ✅ Screenshot: `{artifacts['screenshot'].name}` (stored locally)\n"
+            screenshot_size = artifacts['screenshot'].stat().st_size
+            if screenshot_size <= 500 * 1024:
+                body += f"- ✅ Screenshot: `{artifacts['screenshot'].name}` (embedded above, {screenshot_size / 1024:.1f} KB)\n"
+            else:
+                body += f"- ⚠️ Screenshot: `{artifacts['screenshot'].name}` (too large to embed, {screenshot_size / 1024:.1f} KB)\n"
         else:
             body += f"- ❌ Screenshot: Not available\n"
 
