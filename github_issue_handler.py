@@ -346,8 +346,29 @@ class GitHubIssueHandler:
             except Exception as e:
                 self.logger.warning(f"Could not load error JSON: {e}")
 
+        # HTML Content
+        if artifacts.get('html'):
+            try:
+                with open(artifacts['html'], 'r', encoding='utf-8', errors='ignore') as f:
+                    html_content = f.read()
+
+                # Truncate if too large (GitHub has limits around 65KB for issue bodies)
+                max_html_length = 50000
+                if len(html_content) > max_html_length:
+                    html_content = html_content[:max_html_length] + "\n\n... (truncated)"
+
+                body += f"### HTML Page Content\n\n"
+                body += f"<details>\n"
+                body += f"<summary>Click to expand HTML dump from <code>{artifacts['html'].name}</code></summary>\n\n"
+                body += f"```html\n{html_content}\n```\n\n"
+                body += f"</details>\n\n"
+            except Exception as e:
+                self.logger.warning(f"Could not load HTML file: {e}")
+                body += f"### HTML Page Content\n\n"
+                body += f"❌ Could not load HTML file: {e}\n\n"
+
         # Attachments note
-        body += f"### Debug Artifacts\n\n"
+        body += f"### Debug Artifacts Summary\n\n"
         body += f"The following debug artifacts have been generated:\n\n"
 
         if artifacts.get('json'):
@@ -356,12 +377,12 @@ class GitHubIssueHandler:
             body += f"- ❌ Error context JSON: Not available\n"
 
         if artifacts.get('screenshot'):
-            body += f"- ✅ Screenshot: `{artifacts['screenshot'].name}`\n"
+            body += f"- ✅ Screenshot: `{artifacts['screenshot'].name}` (stored locally)\n"
         else:
             body += f"- ❌ Screenshot: Not available\n"
 
         if artifacts.get('html'):
-            body += f"- ✅ HTML dump: `{artifacts['html'].name}`\n"
+            body += f"- ✅ HTML dump: `{artifacts['html'].name}` (included above)\n"
         else:
             body += f"- ❌ HTML dump: Not available\n"
 
