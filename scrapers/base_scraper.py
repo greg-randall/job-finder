@@ -6,8 +6,6 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from playwright.async_api import Page, Browser, Playwright
-
 from config_loader import get_config
 from functions import init_browser, navigate_with_retries, download_all_links, DownloadStats
 from logging_config import ScraperLogger, get_logger
@@ -48,9 +46,8 @@ class BaseScraper(ABC):
         self.logger = logger or get_logger(self.group)
 
         # Browser instances (initialized in scrape())
-        self.page: Optional[Page] = None
-        self.browser: Optional[Browser] = None
-        self.playwright: Optional[Playwright] = None
+        self.tab = None  # nodriver Tab instance
+        self.browser = None  # nodriver Browser instance
 
         # Statistics
         self.stats = {
@@ -91,18 +88,14 @@ class BaseScraper(ABC):
         """Initialize the browser with configured settings."""
         self.logger.debug("Initializing browser...")
         headless = self.config.get('browser.headless', True)
-        self.page, self.playwright, self.browser = await init_browser(headless=headless)
+        self.browser = await init_browser(headless=headless)
 
     async def cleanup_browser(self) -> None:
         """Cleanup browser resources."""
         self.logger.debug("Cleaning up browser resources...")
         try:
-            if self.page:
-                await self.page.context.close()
             if self.browser:
-                await self.browser.close()
-            if self.playwright:
-                await self.playwright.stop()
+                self.browser.stop()
         except Exception as e:
             self.logger.warning(f"Error during cleanup: {str(e)}")
 
@@ -114,14 +107,15 @@ class BaseScraper(ABC):
             True if navigation succeeded, False otherwise
         """
         self.logger.info(f"Attempting to navigate to job board: {self.url}")
-        success = await navigate_with_retries(self.page, self.url, logger=self.logger)
 
-        if success:
+        # In nodriver, we get a tab by navigating to a URL
+        try:
+            self.tab = await self.browser.get(self.url)
             self.logger.info("Successfully loaded job board")
-        else:
-            self.logger.error(f"Failed to load the page: {self.url}")
-
-        return success
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to load the page: {self.url}: {str(e)}")
+            return False
 
     async def download_jobs(self, job_links: List[str]) -> DownloadStats:
         """
@@ -138,7 +132,7 @@ class BaseScraper(ABC):
         sleep_time = self.settings.get('sleep_between_jobs', 0)
         stats = await download_all_links(
             job_links,
-            self.page,
+            self.tab,
             self.name,
             sleep=sleep_time,
             logger=self.logger
@@ -242,15 +236,16 @@ class BaseScraper(ABC):
             self.logger.error(f"Error processing {self.url}: {str(e)}")
             self.stats['errors'] += 1
 
-            # Try to capture error context with page if available
+            # Try to capture error context with tab if available
             try:
-                if self.page and not self.page.is_closed():
+                if self.tab:
                     import traceback
+                    current_url = await self.tab.evaluate('window.location.href')
                     await self.logger.capture_error_context(
                         error_type=type(e).__name__,
                         error_message=str(e),
-                        url=self.page.url,
-                        page=self.page,
+                        url=current_url,
+                        page=self.tab,
                         stack_trace=traceback.format_exc()
                     )
             except Exception as context_error:

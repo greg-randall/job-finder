@@ -16,14 +16,10 @@ from typing import Optional, List, Set, Dict, Any
 from urllib.parse import urljoin, urlparse
 
 import aiofiles
+import nodriver as uc
 import openai
 import trafilatura
-import undetected_chromedriver as uc
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
 from tqdm import tqdm
 
 from logging_config import ScraperLogger, setup_simple_logger
@@ -220,7 +216,7 @@ async def open_ai_call(
 # ============================================================================
 
 async def _try_click_cookie_button(
-    page: Page,
+    tab,
     selector: str,
     debug: bool = False
 ) -> bool:
@@ -228,7 +224,7 @@ async def _try_click_cookie_button(
     Attempt to click a cookie consent button with the given selector.
 
     Args:
-        page: Playwright page object.
+        tab: nodriver Tab object.
         selector: CSS selector for the button.
         debug: Whether to print debug information.
 
@@ -237,31 +233,33 @@ async def _try_click_cookie_button(
     """
     if debug:
         print(f"\nTrying selector: {selector}")
-        element = await page.query_selector(selector)
-        if element:
-            element_html = await element.evaluate('element => element.outerHTML')
-            print(f"Found element: {element_html}")
-        else:
-            print("Selector not found")
 
     try:
-        await page.click(selector, timeout=Timeouts.COOKIE_CLICK)
-        await page.wait_for_timeout(Timeouts.MODAL_CLOSE_WAIT)
-        if debug:
-            print(f"Successfully clicked cookie consent button with selector: {selector}")
-        return True
+        element = await tab.select(selector)
+        if element:
+            if debug:
+                print(f"Found element with selector: {selector}")
+            await element.click()
+            await tab.sleep(Timeouts.MODAL_CLOSE_WAIT / 1000)  # Convert ms to seconds
+            if debug:
+                print(f"Successfully clicked cookie consent button with selector: {selector}")
+            return True
+        else:
+            if debug:
+                print("Selector not found")
+            return False
     except Exception as e:
         if debug:
             print(f"Click failed: {str(e)}")
         return False
 
 
-async def _remove_cookie_modal_js(page: Page, modal_class: str, debug: bool = False) -> bool:
+async def _remove_cookie_modal_js(tab, modal_class: str, debug: bool = False) -> bool:
     """
     Remove cookie modal using JavaScript as a fallback.
 
     Args:
-        page: Playwright page object.
+        tab: nodriver Tab object.
         modal_class: CSS class of the modal to remove.
         debug: Whether to print debug information.
 
@@ -272,7 +270,8 @@ async def _remove_cookie_modal_js(page: Page, modal_class: str, debug: bool = Fa
         print("\nTrying JavaScript removal approach...")
 
     try:
-        result = await page.evaluate(f'''() => {{
+        # In nodriver, we can evaluate JavaScript using the tab's evaluate method
+        result = await tab.evaluate(f'''() => {{
             const modal = document.querySelector('.{modal_class}');
             if (modal) {{
                 modal.remove();
@@ -296,7 +295,7 @@ async def _remove_cookie_modal_js(page: Page, modal_class: str, debug: bool = Fa
 
 
 async def handle_cookie_consent(
-    page: Page,
+    tab,
     consent_modal_class: str,
     debug: bool = False
 ) -> bool:
@@ -304,7 +303,7 @@ async def handle_cookie_consent(
     Handle cookie consent modal if present.
 
     Args:
-        page: Playwright page object.
+        tab: nodriver Tab object.
         consent_modal_class: CSS class of the cookie consent modal.
         debug: Whether to print debug information.
 
@@ -315,23 +314,21 @@ async def handle_cookie_consent(
         if debug:
             print(f"\nLooking for cookie modal with class: {consent_modal_class}")
 
-        cookie_modal = await page.query_selector(f'.{consent_modal_class}')
+        cookie_modal = await tab.select(f'.{consent_modal_class}')
 
         if not cookie_modal:
             return False
 
         if debug:
             print("Found cookie consent modal")
-            modal_html = await cookie_modal.evaluate('element => element.outerHTML')
-            print(f"Modal HTML: {modal_html}")
 
         # Try clicking various accept buttons
         for selector in CookieSelectors.SELECTORS:
-            if await _try_click_cookie_button(page, selector, debug):
+            if await _try_click_cookie_button(tab, selector, debug):
                 return True
 
         # Fallback to JavaScript removal
-        return await _remove_cookie_modal_js(page, consent_modal_class, debug)
+        return await _remove_cookie_modal_js(tab, consent_modal_class, debug)
 
     except Exception as e:
         if debug:
@@ -339,175 +336,37 @@ async def handle_cookie_consent(
         return False
 
 
+
+
 # ============================================================================
-# SELENIUM FUNCTIONS
+# NODRIVER BROWSER FUNCTIONS
 # ============================================================================
 
-async def get_html_with_selenium(
-    url: str,
-    timeout: int = Timeouts.SELENIUM_TIMEOUT
-) -> Optional[str]:
+async def init_browser(headless: bool = False):
     """
-    Fallback function to get page HTML using Selenium with stealth mode.
-
-    Args:
-        url: URL to fetch.
-        timeout: Timeout in seconds.
-
-    Returns:
-        HTML content of the page or None if failed.
-
-    Raises:
-        NavigationError: If navigation fails after all retries.
-    """
-    if not url:
-        raise ValueError("URL cannot be empty")
-
-    driver = None
-    try:
-        options = uc.ChromeOptions()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--disable-infobars')
-        options.add_argument('--disable-blink-features=AutomationControlled')
-
-        try:
-            driver = uc.Chrome(options=options)
-        except Exception as chrome_error:
-            if "This version of ChromeDriver only supports Chrome version" in str(chrome_error):
-                driver = uc.Chrome(options=options, version_main=None)
-            else:
-                raise
-
-        driver.set_page_load_timeout(timeout)
-
-        try:
-            driver.get(url)
-            WebDriverWait(driver, timeout).until(
-                EC.presence_of_element_located(('tag name', 'body'))
-            )
-            return driver.page_source
-
-        except TimeoutException as e:
-            error_msg = f"Timeout while loading {url} with Selenium"
-            print(error_msg)
-            raise NavigationError(error_msg) from e
-
-        except Exception as e:
-            error_msg = f"Error loading {url} with Selenium: {str(e)}"
-            print(error_msg)
-            raise NavigationError(error_msg) from e
-
-    except Exception as e:
-        error_msg = f"Error initializing Selenium: {str(e)}"
-        print(error_msg)
-        raise BrowserInitializationError(error_msg) from e
-
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception as e:
-                print(f"Error closing Selenium driver: {str(e)}")
-
-
-# ============================================================================
-# PLAYWRIGHT BROWSER FUNCTIONS
-# ============================================================================
-
-async def init_browser(headless: bool = False) -> tuple[Page, Playwright, Browser]:
-    """
-    Initialize a Chromium browser with anti-detection measures using Playwright.
+    Initialize a Chromium browser with anti-detection measures using nodriver.
 
     Args:
         headless: Whether to run browser in headless mode.
 
     Returns:
-        Tuple of (page, playwright, browser) for proper resource management.
+        Browser instance from nodriver.
 
     Raises:
         BrowserInitializationError: If browser initialization fails.
     """
-    viewport = secrets.SystemRandom().choice(Resolutions.COMMON)
-
-    playwright = await async_playwright().start()
-
     try:
-        browser = await playwright.chromium.launch(
+        # nodriver.start() handles all anti-detection measures automatically
+        browser = await uc.start(
             headless=headless,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-infobars',
+            browser_args=[
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
-            ],
-            timeout=Timeouts.BROWSER_LAUNCH
+            ]
         )
+        return browser
     except Exception as e:
-        await playwright.stop()
         raise BrowserInitializationError(f"Failed to launch browser: {str(e)}") from e
-
-    try:
-        context = await browser.new_context(
-            viewport=viewport,
-            user_agent=UserAgents.CHROME,
-            java_script_enabled=True,
-            bypass_csp=True,
-            ignore_https_errors=True,
-            locale='en-US',
-            timezone_id='America/New_York',
-            permissions=['geolocation'],
-            extra_http_headers={
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Upgrade-Insecure-Requests': '1',
-                'Cache-Control': 'max-age=0'
-            }
-        )
-
-        context.set_default_timeout(Timeouts.DEFAULT_CONTEXT)
-
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-            });
-
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-            });
-
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                if (parameter === 37445) {
-                    return 'Intel Open Source Technology Center';
-                }
-                if (parameter === 37446) {
-                    return 'Mesa DRI Intel(R) HD Graphics (SKL GT2)';
-                }
-                return getParameter.apply(this, [parameter]);
-            };
-        """)
-
-        page = await context.new_page()
-        return page, playwright, browser
-
-    except Exception as e:
-        await browser.close()
-        await playwright.stop()
-        raise BrowserInitializationError(f"Failed to create browser context: {str(e)}") from e
 
 
 # ============================================================================
@@ -549,66 +408,17 @@ def make_absolute_url(base_url: str, relative_url: Optional[str]) -> Optional[st
 # NAVIGATION FUNCTIONS
 # ============================================================================
 
-async def _try_lynx_fallback(url: str, page: Page, logger: Optional[ScraperLogger] = None) -> bool:
-    """
-    Try using lynx as a last resort fallback.
-
-    Args:
-        url: URL to fetch.
-        page: Playwright page to set content on.
-        logger: Optional logger for structured logging.
-
-    Returns:
-        True if successful, False otherwise.
-    """
-    if logger:
-        logger.warning("Selenium fallback failed, trying lynx...")
-    else:
-        print("Selenium fallback failed, trying lynx...")
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            'lynx', '-source', url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await process.communicate()
-        if stdout:
-            await page.set_content(stdout.decode())
-            return True
-
-        if logger:
-            logger.warning("Lynx fallback also failed")
-        else:
-            print("Lynx fallback also failed")
-        return False
-
-    except FileNotFoundError:
-        if logger:
-            logger.debug("Lynx is not installed, skipping.")
-        else:
-            print("Lynx is not installed, skipping.")
-        return False
-
-    except Exception as e:
-        if logger:
-            logger.error(f"Lynx fallback error: {str(e)}")
-        else:
-            print(f"Lynx fallback error: {str(e)}")
-        return False
-
-
 async def navigate_with_retries(
-    page: Page,
+    tab,
     url: str,
     max_retries: int = Limits.MAX_RETRIES,
     logger: Optional[ScraperLogger] = None
 ) -> bool:
     """
-    Navigate to a URL with retry logic and Selenium fallback.
+    Navigate to a URL with retry logic using nodriver.
 
     Args:
-        page: Playwright page object.
+        tab: nodriver Tab object.
         url: URL to navigate to.
         max_retries: Maximum number of retry attempts.
         logger: Optional logger for structured logging.
@@ -624,8 +434,13 @@ async def navigate_with_retries(
         try:
             if logger:
                 logger.debug(f"Navigation attempt {retry_count}/{max_retries} to {url}")
-            await page.goto(url, timeout=Timeouts.PAGE_LOAD)
-            await page.wait_for_load_state('networkidle', timeout=Timeouts.NETWORK_IDLE)
+
+            # In nodriver, we navigate using tab.get()
+            await tab.get(url)
+
+            # Wait for the page to load (nodriver handles this internally, but we add a small wait)
+            await tab.sleep(Timeouts.WAIT_FOR_LOAD / 1000)  # Convert ms to seconds
+
             if logger:
                 logger.debug(f"Successfully navigated to {url}")
             return True
@@ -638,43 +453,17 @@ async def navigate_with_retries(
                 print(f"Attempt {retry_count}: Error loading page: {str(e)}")
 
             if retry_count == max_retries:
-                # Try Selenium fallback
-                if logger:
-                    logger.warning("Playwright failed all retries, attempting Selenium fallback...")
-                else:
-                    print("Playwright failed, attempting Selenium fallback...")
-
-                try:
-                    content = await get_html_with_selenium(url)
-                    if content:
-                        await page.set_content(content)
-                        if logger:
-                            logger.info("Selenium fallback successful")
-                        return True
-                except Exception as se:
-                    if logger:
-                        logger.error(f"Selenium fallback failed: {str(se)}")
-                    else:
-                        print(f"Selenium fallback error: {str(se)}")
-
-                # Try lynx as last resort
-                if await _try_lynx_fallback(url, page, logger):
-                    if logger:
-                        logger.info("Lynx fallback successful")
-                    return True
-
                 # All methods failed - capture error context
                 if logger:
                     await logger.capture_error_context(
                         error_type="NavigationError",
-                        error_message=f"Failed to navigate to {url} after {max_retries} retries and all fallbacks",
+                        error_message=f"Failed to navigate to {url} after {max_retries} retries",
                         url=url,
-                        page=page,
+                        page=tab,
                         stack_trace=traceback.format_exc(),
                         context={
                             "max_retries": max_retries,
                             "last_error": str(last_error),
-                            "attempted_methods": ["playwright", "selenium", "lynx"],
                             "timeout_ms": Timeouts.PAGE_LOAD
                         }
                     )
@@ -686,17 +475,16 @@ async def navigate_with_retries(
     return False
 
 
-async def wait_for_load(page: Page, timeout: int = Timeouts.WAIT_FOR_LOAD) -> None:
+async def wait_for_load(tab, timeout: int = Timeouts.WAIT_FOR_LOAD) -> None:
     """
-    Wait for page to load completely using multiple wait conditions.
+    Wait for page to load completely.
 
     Args:
-        page: Playwright page object.
-        timeout: Time to wait in milliseconds after networkidle.
+        tab: nodriver Tab object.
+        timeout: Time to wait in milliseconds.
     """
     try:
-        await page.wait_for_load_state('networkidle')
-        await page.wait_for_timeout(timeout)
+        await tab.sleep(timeout / 1000)  # Convert ms to seconds
     except Exception as e:
         print(f"Error waiting for page load: {str(e)}")
 
@@ -728,7 +516,7 @@ def _generate_cache_filename(name: str, url: str) -> Path:
 
 async def _download_single_link(
     url: str,
-    page: Page,
+    tab,
     name: str,
     stats: DownloadStats,
     processed_urls: Set[str],
@@ -740,7 +528,7 @@ async def _download_single_link(
 
     Args:
         url: URL to download.
-        page: Playwright page object.
+        tab: nodriver Tab object.
         name: Name prefix for saved file.
         stats: Download statistics object.
         processed_urls: Set of already processed URLs.
@@ -768,9 +556,10 @@ async def _download_single_link(
     try:
         # Navigate to the page
         try:
-            await navigate_with_retries(page, url, logger=logger)
-            await wait_for_load(page)
-            content = await page.content()
+            await navigate_with_retries(tab, url, logger=logger)
+            await wait_for_load(tab)
+            # Get page content using nodriver
+            content = await tab.get_content()
         except Exception as nav_error:
             if logger:
                 logger.error(f"Navigation error for {url}: {str(nav_error)}")
@@ -815,7 +604,7 @@ async def _download_single_link(
 
 async def download_all_links(
     links: List[str],
-    page: Page,
+    tab,
     name: str,
     sleep: int = 0,
     logger: Optional[ScraperLogger] = None
@@ -825,7 +614,7 @@ async def download_all_links(
 
     Args:
         links: List of URLs to download.
-        page: Playwright page object.
+        tab: nodriver Tab object.
         name: Name prefix for saved files.
         sleep: Optional sleep time between requests in seconds.
         logger: Optional logger for structured logging.
@@ -863,7 +652,7 @@ async def download_all_links(
 
     for url in tqdm(links_list, desc=f"Downloading jobs for {name}"):
         success = await _download_single_link(
-            url, page, name, stats, processed_urls, sleep, logger
+            url, tab, name, stats, processed_urls, sleep, logger
         )
 
         if success:
@@ -909,7 +698,7 @@ async def download_all_links(
 # ============================================================================
 
 async def _extract_job_links(
-    page: Page,
+    tab,
     job_link_selector: str,
     logger: Optional[ScraperLogger] = None
 ) -> List[str]:
@@ -917,7 +706,7 @@ async def _extract_job_links(
     Extract job links from the current page.
 
     Args:
-        page: Playwright page object.
+        tab: nodriver Tab object.
         job_link_selector: CSS selector for job links.
         logger: Optional logger for structured logging.
 
@@ -925,7 +714,8 @@ async def _extract_job_links(
         List of job link URLs.
     """
     try:
-        links = await page.evaluate(f'''() => {{
+        # Use nodriver's evaluate method to extract links
+        links = await tab.evaluate(f'''() => {{
             const elements = document.querySelectorAll('{job_link_selector}');
             return Array.from(elements).map(el => el.href);
         }}''')
@@ -935,14 +725,15 @@ async def _extract_job_links(
 
         if not links and logger:
             # Selector didn't match anything - capture error context
+            current_url = await tab.evaluate('window.location.href')
             await logger.capture_error_context(
                 error_type="SelectorError",
                 error_message=f"Job link selector '{job_link_selector}' returned no results",
-                url=page.url,
-                page=page,
+                url=current_url,
+                page=tab,
                 context={
                     "selector": job_link_selector,
-                    "page_url": page.url,
+                    "page_url": current_url,
                     "selector_type": "job_links"
                 }
             )
@@ -952,11 +743,12 @@ async def _extract_job_links(
     except Exception as e:
         if logger:
             logger.error(f"Error extracting job links: {str(e)}")
+            current_url = await tab.evaluate('window.location.href')
             await logger.capture_error_context(
                 error_type="SelectorError",
                 error_message=f"Failed to extract job links with selector '{job_link_selector}'",
-                url=page.url,
-                page=page,
+                url=current_url,
+                page=tab,
                 stack_trace=traceback.format_exc(),
                 context={
                     "selector": job_link_selector,
@@ -967,7 +759,7 @@ async def _extract_job_links(
 
 
 async def _navigate_to_next_page(
-    page: Page,
+    tab,
     next_page_selector: str,
     next_page_disabled_selector: str,
     logger: Optional[ScraperLogger] = None
@@ -976,7 +768,7 @@ async def _navigate_to_next_page(
     Navigate to the next page of results.
 
     Args:
-        page: Playwright page object.
+        tab: nodriver Tab object.
         next_page_selector: CSS selector for next page button.
         next_page_disabled_selector: CSS selector for disabled next page button.
         logger: Optional logger for structured logging.
@@ -985,7 +777,7 @@ async def _navigate_to_next_page(
         True if navigation succeeded, False if on last page.
     """
     # Check if on last page
-    next_button_disabled = await page.query_selector(next_page_disabled_selector)
+    next_button_disabled = await tab.select(next_page_disabled_selector)
     if next_button_disabled:
         if logger:
             logger.info("Reached last page - next button is disabled")
@@ -994,7 +786,7 @@ async def _navigate_to_next_page(
         return False
 
     # Find and click next button
-    next_button = await page.query_selector(next_page_selector)
+    next_button = await tab.select(next_page_selector)
     if not next_button:
         if logger:
             logger.info("No more next button found")
@@ -1003,7 +795,7 @@ async def _navigate_to_next_page(
         return False
 
     await next_button.click()
-    await wait_for_load(page)
+    await wait_for_load(tab)
     return True
 
 
@@ -1054,7 +846,7 @@ async def scrape_site(
     else:
         print("Initializing browser...")
 
-    page, playwright, browser = await init_browser(headless=headless)
+    browser = await init_browser(headless=headless)
 
     try:
         if logger:
@@ -1062,9 +854,8 @@ async def scrape_site(
         else:
             print("Attempting to navigate to job board...")
 
-        success = await navigate_with_retries(page, url, logger=logger)
-        if not success:
-            raise NavigationError(f"Failed to load the page: {url}")
+        # Get the main tab from the browser
+        tab = await browser.get(url)
 
         if logger:
             logger.info("Successfully loaded job board")
@@ -1076,7 +867,7 @@ async def scrape_site(
 
         # Scrape all pages
         while True:
-            job_links = await _extract_job_links(page, job_link_selector, logger)
+            job_links = await _extract_job_links(tab, job_link_selector, logger)
             all_job_links.extend(job_links)
 
             if logger:
@@ -1085,7 +876,7 @@ async def scrape_site(
                 print(f"📄 Page {page_num}: Found {len(job_links)} job links")
 
             # Try to navigate to next page
-            if not await _navigate_to_next_page(page, next_page_selector, next_page_disabled_selector, logger):
+            if not await _navigate_to_next_page(tab, next_page_selector, next_page_disabled_selector, logger):
                 break
 
             page_num += 1
@@ -1105,7 +896,7 @@ async def scrape_site(
         else:
             print("\n⬇️ Starting download of job postings...")
 
-        await download_all_links(all_job_links, page, name, logger=logger)
+        await download_all_links(all_job_links, tab, name, logger=logger)
 
     except Exception as e:
         if logger:
@@ -1121,9 +912,8 @@ async def scrape_site(
             print("🧹 Cleaning up browser resources...")
 
         try:
-            await page.context.close()
-            await browser.close()
-            await playwright.stop()
+            # nodriver cleanup
+            browser.stop()
         except Exception as e:
             if logger:
                 logger.warning(f"Error during cleanup: {str(e)}")

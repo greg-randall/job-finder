@@ -40,7 +40,7 @@ class URLPaginationScraper(BaseScraper):
 
         try:
             # Extract all links from the job table
-            job_links = await self.page.evaluate(f'''() => {{
+            job_links = await self.tab.evaluate(f'''() => {{
                 const jobTable = document.querySelector('{job_table_selector}');
                 if (!jobTable) return [];
                 const links = jobTable.querySelectorAll('{job_link_selector}');
@@ -89,7 +89,7 @@ class URLPaginationScraper(BaseScraper):
         if wait_min > 0 and wait_max > 0:
             wait_time = random.uniform(wait_min, wait_max)
             self.logger.debug(f"Waiting {wait_time:.1f} seconds before next page...")
-            await self.page.wait_for_timeout(int(wait_time * 1000))
+            await self.tab.wait_for_timeout(int(wait_time * 1000))
 
         return True
 
