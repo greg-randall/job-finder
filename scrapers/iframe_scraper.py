@@ -5,9 +5,7 @@ This scraper handles sites like iCIMS that embed their job listings
 within an iframe element.
 """
 
-from typing import List, Optional
-
-from playwright.async_api import Frame
+from typing import List
 
 from scrapers.base_scraper import BaseScraper
 
@@ -16,27 +14,22 @@ class IframeScraper(BaseScraper):
     """
     Scraper for job boards that use iframes (e.g., iCIMS).
 
-    This scraper switches to an iframe context before scraping
-    and handles pagination within the iframe.
+    This scraper handles iframe content extraction and pagination.
     """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.frame: Optional[Frame] = None
 
     async def navigate_to_start_page(self) -> bool:
         """
-        Navigate to start page and switch to iframe context.
+        Navigate to start page and verify iframe is present.
 
         Returns:
-            True if navigation and iframe switch succeeded, False otherwise
+            True if navigation succeeded and iframe found, False otherwise
         """
         # First, navigate to the page
         success = await super().navigate_to_start_page()
         if not success:
             return False
 
-        # Now find and switch to the iframe
+        # Verify iframe is present
         iframe_selector = self.selectors.get('iframe')
         if not iframe_selector:
             self.logger.error("No iframe selector configured")
@@ -44,18 +37,17 @@ class IframeScraper(BaseScraper):
 
         try:
             self.logger.debug(f"Looking for iframe: {iframe_selector}")
-            iframe = await self.page.wait_for_selector(iframe_selector)
-            self.frame = await iframe.content_frame()
+            iframe = await self.tab.select(iframe_selector)
 
-            if not self.frame:
-                self.logger.error("Failed to get iframe content frame")
+            if not iframe:
+                self.logger.error("Failed to find iframe")
                 return False
 
-            self.logger.info("Successfully switched to iframe")
+            self.logger.info("Successfully found iframe")
             return True
 
         except Exception as e:
-            self.logger.error(f"Error switching to iframe: {str(e)}")
+            self.logger.error(f"Error finding iframe: {str(e)}")
             return False
 
     async def extract_job_links(self) -> List[str]:
@@ -65,10 +57,7 @@ class IframeScraper(BaseScraper):
         Returns:
             List of job URLs
         """
-        if not self.frame:
-            self.logger.error("Frame not initialized")
-            return []
-
+        iframe_selector = self.selectors.get('iframe')
         job_link_selector = self.selectors.get('job_link')
         job_link_filter = self.selectors.get('job_link_filter', '')
 
@@ -77,14 +66,14 @@ class IframeScraper(BaseScraper):
             return []
 
         try:
-            # Wait for job links to be visible
-            await self.frame.wait_for_selector(job_link_selector, state='visible')
-
-            # Extract links with optional filtering
+            # Extract links from iframe using JavaScript
             if job_link_filter:
                 # Use custom filter function
-                job_links = await self.frame.evaluate(f'''() => {{
-                    const elements = document.querySelectorAll('{job_link_selector}');
+                job_links = await self.tab.evaluate(f'''() => {{
+                    const iframe = document.querySelector('{iframe_selector}');
+                    if (!iframe || !iframe.contentDocument) return [];
+                    const doc = iframe.contentDocument;
+                    const elements = doc.querySelectorAll('{job_link_selector}');
                     const filterFn = {job_link_filter};
                     return Array.from(elements)
                         .filter(filterFn)
@@ -92,8 +81,11 @@ class IframeScraper(BaseScraper):
                 }}''')
             else:
                 # Simple extraction
-                job_links = await self.frame.evaluate(f'''() => {{
-                    const elements = document.querySelectorAll('{job_link_selector}');
+                job_links = await self.tab.evaluate(f'''() => {{
+                    const iframe = document.querySelector('{iframe_selector}');
+                    if (!iframe || !iframe.contentDocument) return [];
+                    const doc = iframe.contentDocument;
+                    const elements = doc.querySelectorAll('{job_link_selector}');
                     return Array.from(elements).map(el => el.href);
                 }}''')
 
@@ -111,42 +103,51 @@ class IframeScraper(BaseScraper):
         Returns:
             True if successfully navigated to next page, False if no more pages
         """
-        if not self.frame:
-            self.logger.error("Frame not initialized")
-            return False
-
+        iframe_selector = self.selectors.get('iframe')
         next_page_selector = self.selectors.get('next_page')
         if not next_page_selector:
             self.logger.debug("No pagination configured for this site")
             return False
 
-        # Find next button
-        next_button = await self.frame.query_selector(next_page_selector)
-        if not next_button:
-            self.logger.info("No more next button found")
-            return False
+        try:
+            # Check if next button exists and click it via JavaScript
+            disabled_check = self.selectors.get('next_page_disabled_check', '')
 
-        # Check if disabled using custom check function
-        disabled_check = self.selectors.get('next_page_disabled_check')
-        if disabled_check:
-            try:
-                is_disabled = await next_button.evaluate(f'''(el) => {{
+            if disabled_check:
+                # Check if button is disabled using custom check
+                is_disabled = await self.tab.evaluate(f'''() => {{
+                    const iframe = document.querySelector('{iframe_selector}');
+                    if (!iframe || !iframe.contentDocument) return true;
+                    const doc = iframe.contentDocument;
+                    const button = doc.querySelector('{next_page_selector}');
+                    if (!button) return true;
                     const checkFn = {disabled_check};
-                    return checkFn(el);
+                    return checkFn(button);
                 }}''')
 
                 if is_disabled:
-                    self.logger.info("Reached last page - next button is disabled")
+                    self.logger.info("Reached last page - next button is disabled or not found")
                     return False
 
-            except Exception as e:
-                self.logger.warning(f"Error checking if next button is disabled: {str(e)}")
+            # Click the next button
+            clicked = await self.tab.evaluate(f'''() => {{
+                const iframe = document.querySelector('{iframe_selector}');
+                if (!iframe || !iframe.contentDocument) return false;
+                const doc = iframe.contentDocument;
+                const button = doc.querySelector('{next_page_selector}');
+                if (button) {{
+                    button.click();
+                    return true;
+                }}
+                return false;
+            }}''')
 
-        # Click next button
-        try:
-            await next_button.click()
-            await self.frame.wait_for_load_state('networkidle')
-            await self.frame.wait_for_selector(self.selectors.get('job_link'), state='visible')
+            if not clicked:
+                self.logger.info("No more next button found")
+                return False
+
+            # Wait for page to load
+            await self.tab.sleep(2)
             self.logger.debug("Successfully navigated to next page in iframe")
             return True
 

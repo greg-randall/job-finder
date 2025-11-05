@@ -34,7 +34,7 @@ class StandardScraper(BaseScraper):
             return []
 
         try:
-            links = await self.page.evaluate(f'''() => {{
+            links = await self.tab.evaluate(f'''() => {{
                 const elements = document.querySelectorAll('{job_link_selector}');
                 return Array.from(elements).map(el => el.href).filter(href => href);
             }}''')
@@ -43,14 +43,15 @@ class StandardScraper(BaseScraper):
 
             if not links:
                 # Selector didn't match anything - capture error context
+                current_url = await self.tab.evaluate('window.location.href')
                 await self.logger.capture_error_context(
                     error_type="SelectorError",
                     error_message=f"Job link selector '{job_link_selector}' returned no results",
-                    url=self.page.url,
-                    page=self.page,
+                    url=current_url,
+                    page=self.tab,
                     context={
                         "selector": job_link_selector,
-                        "page_url": self.page.url,
+                        "page_url": current_url,
                         "selector_type": "job_links"
                     }
                 )
@@ -59,11 +60,12 @@ class StandardScraper(BaseScraper):
 
         except Exception as e:
             self.logger.error(f"Error extracting job links: {str(e)}")
+            current_url = await self.tab.evaluate('window.location.href')
             await self.logger.capture_error_context(
                 error_type="SelectorError",
                 error_message=f"Failed to extract job links with selector '{job_link_selector}'",
-                url=self.page.url,
-                page=self.page,
+                url=current_url,
+                page=self.tab,
                 stack_trace=str(e),
                 context={
                     "selector": job_link_selector,
@@ -89,20 +91,20 @@ class StandardScraper(BaseScraper):
 
         # Check if on last page (disabled button)
         if next_page_disabled_selector:
-            next_button_disabled = await self.page.query_selector(next_page_disabled_selector)
+            next_button_disabled = await self.tab.select(next_page_disabled_selector)
             if next_button_disabled:
                 self.logger.info("Reached last page - next button is disabled")
                 return False
 
         # Find and click next button
-        next_button = await self.page.query_selector(next_page_selector)
+        next_button = await self.tab.select(next_page_selector)
         if not next_button:
             self.logger.info("No more next button found")
             return False
 
         try:
             await next_button.click()
-            await wait_for_load(self.page)
+            await wait_for_load(self.tab)
             self.logger.debug("Successfully navigated to next page")
             return True
 

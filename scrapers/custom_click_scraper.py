@@ -62,12 +62,13 @@ class CustomClickScraper(BaseScraper):
 
         try:
             self.logger.debug("Looking for 'View all' button...")
-            view_all_button = await self.page.wait_for_selector(view_all_selector, timeout=5000)
+            # In nodriver, we use select to find elements
+            view_all_button = await self.tab.select(view_all_selector)
 
             if view_all_button:
                 self.logger.info("Found 'View all' button, clicking...")
                 await view_all_button.click()
-                await wait_for_load(self.page)
+                await wait_for_load(self.tab)
                 self.logger.info("Clicked 'View all' button")
 
             return True
@@ -112,7 +113,7 @@ class CustomClickScraper(BaseScraper):
             self.logger.error("No job_button selector configured")
             return []
 
-        job_buttons = await self.page.query_selector_all(job_button_selector)
+        job_buttons = await self.tab.select_all(job_button_selector)
 
         if not job_buttons:
             self.logger.error("No job buttons found")
@@ -120,7 +121,7 @@ class CustomClickScraper(BaseScraper):
                 error_type="SelectorError",
                 error_message=f"No job buttons found with selector '{job_button_selector}'",
                 url=self.url,
-                page=self.page,
+                page=self.tab,
                 context={
                     "selector": job_button_selector,
                     "selector_type": "job_buttons"
@@ -139,7 +140,7 @@ class CustomClickScraper(BaseScraper):
 
         # Process each job
         for button_id in button_ids:
-            button = await self.page.query_selector(f'[id="{button_id}"]')
+            button = await self.tab.select(f'[id="{button_id}"]')
             if not button:
                 self.logger.warning(f"Could not find button with ID {button_id}, skipping...")
                 continue
@@ -147,7 +148,9 @@ class CustomClickScraper(BaseScraper):
             try:
                 # Extract job info
                 job_id = button_id.split('_')[1] if '_' in button_id else button_id
-                job_title = await button.get_attribute('aria-label') or f"Job {job_id}"
+                # In nodriver, get_attribute is available on elements
+                job_title_attr = await button.get_attribute('aria-label')
+                job_title = job_title_attr or f"Job {job_id}"
 
                 # Check if already processed in this session
                 if job_id in processed_jobs:
@@ -155,8 +158,8 @@ class CustomClickScraper(BaseScraper):
                     continue
 
                 # Construct job URL
-                base_url = await self.page.evaluate('window.location.href.split("?")[0]')
-                cid = await self.page.evaluate('new URLSearchParams(window.location.search).get("cid")')
+                base_url = await self.tab.evaluate('window.location.href.split("?")[0]')
+                cid = await self.tab.evaluate('new URLSearchParams(window.location.search).get("cid")')
                 job_url = f"{base_url}?cid={cid}&jobId={job_id}&source=CareerSite"
 
                 # Check if already cached
@@ -170,7 +173,7 @@ class CustomClickScraper(BaseScraper):
                 # Click the job to open details
                 container_selector = self.selectors.get('container')
                 if container_selector:
-                    await self.page.evaluate(f'''() => {{
+                    await self.tab.evaluate(f'''() => {{
                         const container = document.querySelector('{container_selector}');
                         if (container) {{
                             const button = container.querySelector('sdf-button');
@@ -182,10 +185,10 @@ class CustomClickScraper(BaseScraper):
                 else:
                     await button.click()
 
-                await wait_for_load(self.page)
+                await wait_for_load(self.tab)
 
                 # Extract content
-                content = await self.page.content()
+                content = await self.tab.get_content()
                 extracted_text = trafilatura.extract(content, favor_recall=True)
 
                 if extracted_text:
@@ -200,8 +203,8 @@ class CustomClickScraper(BaseScraper):
                     if self.settings.get('click_back_after_job', True):
                         back_button_selector = self.selectors.get('back_button')
                         if back_button_selector:
-                            await self.page.evaluate(f"document.querySelector('{back_button_selector}').click();")
-                            await wait_for_load(self.page)
+                            await self.tab.evaluate(f"document.querySelector('{back_button_selector}').click();")
+                            await wait_for_load(self.tab)
 
                             # Click view all again if configured
                             if self.settings.get('click_view_all_after_back', True):
@@ -226,8 +229,8 @@ class CustomClickScraper(BaseScraper):
                 try:
                     back_button_selector = self.selectors.get('back_button')
                     if back_button_selector:
-                        await self.page.evaluate(f"document.querySelector('{back_button_selector}').click();")
-                        await wait_for_load(self.page)
+                        await self.tab.evaluate(f"document.querySelector('{back_button_selector}').click();")
+                        await wait_for_load(self.tab)
                 except Exception:
                     pass
 

@@ -44,7 +44,7 @@ class CustomNavigationScraper(BaseScraper):
             if cookie_modal_class:
                 self.logger.debug(f"Handling cookie consent for modal: {cookie_modal_class}")
                 await handle_cookie_consent(self.page, cookie_modal_class)
-                await self.page.wait_for_timeout(1000)
+                await self.tab.wait_for_timeout(1000)
 
         return True
 
@@ -61,7 +61,7 @@ class CustomNavigationScraper(BaseScraper):
             return []
 
         try:
-            job_links = await self.page.evaluate(f'''() => {{
+            job_links = await self.tab.evaluate(f'''() => {{
                 const elements = document.querySelectorAll('{job_link_selector}');
                 return Array.from(elements).map(el => el.href);
             }}''')
@@ -95,7 +95,7 @@ class CustomNavigationScraper(BaseScraper):
             return False
 
         # Find next button
-        next_button = await self.page.query_selector(next_page_selector)
+        next_button = await self.tab.query_selector(next_page_selector)
         if not next_button:
             self.logger.info("No more next button found")
             return False
