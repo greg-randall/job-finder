@@ -20,6 +20,7 @@ from typing import List, Optional
 from config_loader import get_config
 from logging_config import get_logger
 from scrapers import create_scraper
+from github_issue_handler import report_scraper_failure
 
 
 async def run_site(site_config: dict, logger) -> dict:
@@ -52,11 +53,49 @@ async def run_site(site_config: dict, logger) -> dict:
         else:
             logger.increment_stat("sites_failed")
 
+            # Report failure to GitHub
+            logger.info(f"Reporting scraper failure to GitHub for: {site_name}")
+            error_summary = result.get('reason', 'Unknown error occurred')
+            stats = result.get('stats', {})
+
+            try:
+                success = report_scraper_failure(
+                    scraper_name=site_name,
+                    scraper_url=site_url,
+                    error_summary=error_summary,
+                    stats=stats,
+                    logger=logger
+                )
+                if success:
+                    logger.info(f"✓ GitHub issue created/updated for {site_name}")
+                else:
+                    logger.warning(f"Failed to create/update GitHub issue for {site_name}")
+            except Exception as gh_error:
+                logger.warning(f"Error reporting to GitHub: {gh_error}")
+
         return result
 
     except Exception as e:
         logger.error(f"Failed to scrape {site_name}: {str(e)}")
         logger.increment_stat("sites_failed")
+
+        # Report failure to GitHub
+        error_summary = f"Exception during scraping: {str(e)}"
+        try:
+            success = report_scraper_failure(
+                scraper_name=site_name,
+                scraper_url=site_url,
+                error_summary=error_summary,
+                stats={},
+                logger=logger
+            )
+            if success:
+                logger.info(f"✓ GitHub issue created/updated for {site_name}")
+            else:
+                logger.warning(f"Failed to create/update GitHub issue for {site_name}")
+        except Exception as gh_error:
+            logger.warning(f"Error reporting to GitHub: {gh_error}")
+
         return {
             'success': False,
             'reason': str(e),
