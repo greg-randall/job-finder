@@ -24,6 +24,7 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from tqdm import tqdm
 
 from logging_config import ScraperLogger, setup_simple_logger
 
@@ -860,7 +861,7 @@ async def download_all_links(
     )
     consecutive_errors = 0
 
-    for url in links_list:
+    for url in tqdm(links_list, desc=f"Downloading jobs for {name}"):
         success = await _download_single_link(
             url, page, name, stats, processed_urls, sleep, logger
         )
