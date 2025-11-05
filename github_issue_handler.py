@@ -27,6 +27,7 @@ class GitHubIssueHandler:
         self.logger = logger
         self.repo_root = Path(__file__).parent
         self.error_dir = self.repo_root / "logs" / "errors"
+        self._labels_cache = {}  # Cache for label existence checks
 
     def _run_gh_command(self, args: List[str], input_data: Optional[str] = None) -> Tuple[bool, str]:
         """
@@ -64,6 +65,125 @@ class GitHubIssueHandler:
             self.logger.error(f"Error running gh command: {e}")
             return False, str(e)
 
+    def _label_exists(self, label_name: str) -> bool:
+        """
+        Check if a label exists in the repository.
+
+        Args:
+            label_name: Name of the label to check
+
+        Returns:
+            True if label exists, False otherwise
+        """
+        # Check cache first
+        if label_name in self._labels_cache:
+            return self._labels_cache[label_name]
+
+        # Query GitHub for the label
+        success, output = self._run_gh_command([
+            "label", "list",
+            "--json", "name",
+            "--limit", "1000"  # Should be enough for most repos
+        ])
+
+        if not success:
+            self.logger.warning(f"Could not list labels: {output}")
+            return False
+
+        try:
+            labels = json.loads(output)
+            label_names = {label['name'] for label in labels}
+            exists = label_name in label_names
+
+            # Cache the result
+            self._labels_cache[label_name] = exists
+
+            return exists
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse label list: {e}")
+            return False
+
+    def _create_label(self, label_name: str, color: str, description: str) -> bool:
+        """
+        Create a new label in the repository.
+
+        Args:
+            label_name: Name of the label
+            color: Hex color code (without #)
+            description: Label description
+
+        Returns:
+            True if created successfully, False otherwise
+        """
+        self.logger.info(f"Creating label: {label_name}")
+
+        success, output = self._run_gh_command([
+            "label", "create", label_name,
+            "--color", color,
+            "--description", description
+        ])
+
+        if success:
+            self._labels_cache[label_name] = True
+            self.logger.info(f"Successfully created label: {label_name}")
+            return True
+        else:
+            self.logger.error(f"Failed to create label {label_name}: {output}")
+            return False
+
+    def _ensure_labels_exist(self, labels: List[str]) -> List[str]:
+        """
+        Ensure that required labels exist in the repository.
+        Creates them if they don't exist.
+
+        Args:
+            labels: List of label names to ensure exist
+
+        Returns:
+            List of labels that are confirmed to exist or were created successfully
+        """
+        # Define colors and descriptions for standard labels
+        label_configs = {
+            'scraper-failure': {
+                'color': 'd73a4a',  # Red
+                'description': 'Automated issue for scraper failure'
+            },
+            'auto-generated': {
+                'color': '808080',  # Gray
+                'description': 'Automatically generated issue'
+            }
+        }
+
+        confirmed_labels = []
+
+        for label in labels:
+            # Check if label exists
+            if self._label_exists(label):
+                confirmed_labels.append(label)
+                continue
+
+            # Determine label configuration
+            if label in label_configs:
+                config = label_configs[label]
+            elif label.startswith('scraper:'):
+                # Dynamic scraper label
+                config = {
+                    'color': '0366d6',  # Blue
+                    'description': f'Issues related to the {label.split(":", 1)[1]} scraper'
+                }
+            else:
+                # Unknown label type - skip it
+                self.logger.warning(f"Skipping unknown label: {label}")
+                continue
+
+            # Try to create the label
+            if self._create_label(label, config['color'], config['description']):
+                confirmed_labels.append(label)
+            else:
+                self.logger.warning(f"Could not create label {label}, continuing without it")
+
+        return confirmed_labels
+
     def find_existing_issue(self, scraper_name: str) -> Optional[int]:
         """
         Check if an open issue already exists for this scraper.
@@ -76,15 +196,24 @@ class GitHubIssueHandler:
         """
         self.logger.debug(f"Checking for existing issue for scraper: {scraper_name}")
 
-        # Search for open issues with the scraper label
-        success, output = self._run_gh_command([
+        # Build search command - only add label filters if labels exist
+        cmd = [
             "issue", "list",
-            "--label", f"scraper:{scraper_name}",
-            "--label", "scraper-failure",
             "--state", "open",
             "--json", "number,title",
-            "--limit", "1"
-        ])
+            "--limit", "100"  # Get more issues to search through
+        ]
+
+        # Check if labels exist before filtering by them
+        scraper_label = f"scraper:{scraper_name}"
+        if self._label_exists(scraper_label):
+            cmd.extend(["--label", scraper_label])
+
+        if self._label_exists("scraper-failure"):
+            cmd.extend(["--label", "scraper-failure"])
+
+        # Search for open issues
+        success, output = self._run_gh_command(cmd)
 
         if not success:
             self.logger.warning(f"Could not search for existing issues: {output}")
@@ -92,10 +221,12 @@ class GitHubIssueHandler:
 
         try:
             issues = json.loads(output)
-            if issues and len(issues) > 0:
-                issue_number = issues[0]['number']
-                self.logger.info(f"Found existing issue #{issue_number} for {scraper_name}")
-                return issue_number
+            # Look for issues matching the scraper name in the title
+            for issue in issues:
+                if scraper_name in issue.get('title', ''):
+                    issue_number = issue['number']
+                    self.logger.info(f"Found existing issue #{issue_number} for {scraper_name}")
+                    return issue_number
         except json.JSONDecodeError as e:
             self.logger.error(f"Failed to parse issue list: {e}")
 
@@ -269,15 +400,23 @@ class GitHubIssueHandler:
             scraper_name, scraper_url, error_summary, stats, artifacts, update=False
         )
 
-        # Create the issue
-        success, output = self._run_gh_command([
+        # Ensure required labels exist
+        requested_labels = ["scraper-failure", "auto-generated", f"scraper:{scraper_name}"]
+        confirmed_labels = self._ensure_labels_exist(requested_labels)
+
+        # Build the issue creation command
+        cmd = [
             "issue", "create",
             "--title", title,
-            "--body", body,
-            "--label", "scraper-failure",
-            "--label", "auto-generated",
-            "--label", f"scraper:{scraper_name}"
-        ])
+            "--body", body
+        ]
+
+        # Add labels that were confirmed to exist
+        for label in confirmed_labels:
+            cmd.extend(["--label", label])
+
+        # Create the issue
+        success, output = self._run_gh_command(cmd)
 
         if not success:
             self.logger.error(f"Failed to create issue: {output}")
