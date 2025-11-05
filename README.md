@@ -61,6 +61,31 @@ You also need to install the Playwright browser dependencies:
 playwright install
 ```
 
+## Automatic Error Reporting
+
+When a scraper fails, the system automatically creates or updates a GitHub issue with comprehensive debugging information, including:
+
+- Error details and stack traces
+- Operation history (breadcrumbs)
+- Statistics (pages scraped, jobs found, etc.)
+- Debug artifacts (screenshots, HTML dumps, error context JSON)
+
+Each scraper gets its own issue that is updated on subsequent failures, preventing duplicate issues.
+
+**GitHub Authentication Required:**
+The automatic error reporting feature requires the GitHub CLI (`gh`) to be installed and authenticated with appropriate repository permissions. To set up:
+
+```bash
+# Install GitHub CLI (if not already installed)
+# On macOS: brew install gh
+# On Linux: See https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+
+# Authenticate with GitHub
+gh auth login
+```
+
+**Note:** Enhanced credential management (environment variables, config file storage) is planned for a future release.
+
 ## Usage
 
 1.  **Installation**: Install the required Python libraries as described above.
@@ -71,6 +96,7 @@ playwright install
         ```
     -   Update `config.yaml` to specify the job boards you want to scrape. You can enable/disable sites and groups by setting the `enabled` flag to `true` or `false`.
     -   Place your resume file (e.g., `resume.md`) in the root directory and ensure the path is correctly set in `config.yaml`.
+    -   **(Optional)** Set up GitHub CLI authentication for automatic error reporting (see above).
 3.  **Scraping**: Run the `run_scrapers.py` script to start collecting job postings.
     ```bash
     # Run all enabled scrapers
