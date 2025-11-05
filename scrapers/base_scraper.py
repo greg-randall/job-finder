@@ -241,6 +241,22 @@ class BaseScraper(ABC):
         except Exception as e:
             self.logger.error(f"Error processing {self.url}: {str(e)}")
             self.stats['errors'] += 1
+
+            # Try to capture error context with page if available
+            try:
+                if self.page and not self.page.is_closed():
+                    import traceback
+                    await self.logger.capture_error_context(
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        url=self.page.url,
+                        page=self.page,
+                        stack_trace=traceback.format_exc()
+                    )
+            except Exception as context_error:
+                # If context capture fails (e.g., browser already closed), just log it
+                self.logger.warning(f"Could not capture error context: {str(context_error)}")
+
             return {
                 'success': False,
                 'reason': str(e),
