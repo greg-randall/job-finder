@@ -233,7 +233,7 @@ class ColoredConsoleFormatter(logging.Formatter):
     # Emoji prefixes for different log levels
     FORMATS = {
         logging.DEBUG: "🔍 [DEBUG] %(message)s",
-        logging.INFO: "📍 [INFO] %(message)s",
+        logging.INFO: "[INFO] %(message)s",
         logging.WARNING: "⚠️  [WARN] %(message)s",
         logging.ERROR: "❌ [ERROR] %(message)s",
         logging.CRITICAL: "🚨 [CRITICAL] %(message)s",
