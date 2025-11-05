@@ -1,0 +1,302 @@
+# ============================================================================
+# Job Finder Configuration
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# OpenAI Configuration
+# ----------------------------------------------------------------------------
+openai:
+  api_key_env: "OPENAI_API_KEY"  # Environment variable name
+  model: "gpt-4o-mini"
+  temperature: 0.2
+
+# ----------------------------------------------------------------------------
+# Location Settings
+# ----------------------------------------------------------------------------
+location:
+  primary_city: "Richmond"
+  coordinates:
+    latitude: 37.5407
+    longitude: -77.4360
+  radius_miles: 50
+  area_cities:
+    - richmond
+    - glen allen
+    - mechanicsville
+    - chester
+    - chesterfield
+    - midlothian
+    - henrico
+    - ashland
+    - colonial heights
+    - hopewell
+    - petersburg
+    - hanover
+    - goochland
+    - powhatan
+    - dinwiddie
+  area_zipcodes:
+    - "232"
+    - "231"
+    - "238"
+  virginia_indicators:
+    - "va"
+    - "virginia"
+    - "232"
+    - "231"
+    - "238"
+
+# ----------------------------------------------------------------------------
+# Job Rating Configuration
+# ----------------------------------------------------------------------------
+rating:
+  weights:
+    experience: 0.35
+    education: 0.15
+    skills: 0.35
+    interest: 0.15
+  thresholds:
+    high_quality: 6.0
+    min_category_score: 5
+    min_threshold: null  # Set to filter jobs during processing
+
+# ----------------------------------------------------------------------------
+# File Paths
+# ----------------------------------------------------------------------------
+paths:
+  cache_dir: "cache"
+  resume: "resume.md"
+  cover_letter: null
+  processed_jobs: "processed_jobs.csv"
+  completed_urls: "completed_urls.txt"
+  ranked_jobs: "ranked_jobs.csv"
+  high_quality_prefix: "high_quality_matches"
+  debug_screenshots: "debug_screenshots"
+  debug_html: "debug_html"
+
+# ----------------------------------------------------------------------------
+# Processing Settings
+# ----------------------------------------------------------------------------
+processing:
+  parallel_workers: 32
+  min_content_length: 200
+  max_jobs: null  # Set to limit number of jobs processed
+  force_reprocess: false
+  debug: false
+  richmond_or_remote_only: true
+
+# ----------------------------------------------------------------------------
+# Browser Settings
+# ----------------------------------------------------------------------------
+browser:
+  headless: true
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+
+  timeouts:
+    page_load_ms: 20000
+    network_idle_ms: 20000
+    default_context_ms: 60000
+    browser_launch_ms: 300000
+    cookie_click_ms: 2000
+    modal_close_wait_ms: 1000
+    wait_for_load_ms: 2000
+    selenium_timeout_sec: 20
+
+  retries:
+    max_retries: 3
+    max_consecutive_errors: 8
+
+  resolutions:
+    - width: 1920
+      height: 1080
+    - width: 1366
+      height: 768
+    - width: 1536
+      height: 864
+    - width: 1440
+      height: 900
+    - width: 1280
+      height: 720
+
+  cookie_selectors:
+    - 'button[data-action="init--explicit-consent-modal#accept"]'
+    - 'button[aria-label*="accept" i]'
+    - 'button:has-text("Accept")'
+    - 'button:has-text("I agree")'
+    - '.accept-cookies'
+    - '#accept-cookies'
+
+# ----------------------------------------------------------------------------
+# Job Boards Configuration
+# ----------------------------------------------------------------------------
+job_boards:
+  # Standard Pagination Sites (Workday-style)
+  - group: "workday"
+    type: "standard"
+    enabled: true
+    selectors:
+      job_link: '[data-automation-id="jobTitle"]'
+      next_page: '[data-uxi-widget-type="stepToNextButton"]:not([disabled])'
+      next_page_disabled: '[data-uxi-widget-type="stepToNextButton"][disabled]'
+    sites:
+      - name: "bbinsurance"
+        url: "https://bbinsurance.wd1.myworkdayjobs.com/en-US/Careers"
+        enabled: true
+      - name: "graybar"
+        url: "https://graybar.wd1.myworkdayjobs.com/Careers"
+        enabled: true
+      - name: "gsknch"
+        url: "https://gsknch.wd3.myworkdayjobs.com/GSKCareers"
+        enabled: true
+      - name: "hksinc"
+        url: "https://hksinc.wd5.myworkdayjobs.com/HKSCareers"
+        enabled: true
+      - name: "indivior"
+        url: "https://indivior.wd3.myworkdayjobs.com/Indivior"
+        enabled: true
+      - name: "jdrf"
+        url: "https://jdrf.wd1.myworkdayjobs.com/JDRF?_ga=2.68390741.594165681.1704744294-2139354499.1696866599&_gac=1.47826835.1703000449.EAIaIQobChMI_ufrg-ubgwMV-0tHAR39qwUqEAAYASAAEgJlRfD_BwE"
+        enabled: true
+      - name: "markelcorp"
+        url: "https://markelcorp.wd5.myworkdayjobs.com/GlobalCareers"
+        enabled: true
+      - name: "nascar"
+        url: "https://nascar.wd1.myworkdayjobs.com/NASCAR"
+        enabled: true
+      - name: "patientfirst"
+        url: "https://patientfirst.wd5.myworkdayjobs.com/PatientFirst"
+        enabled: true
+      - name: "pgatoursuperstore"
+        url: "https://pgatoursuperstore.wd12.myworkdayjobs.com/PGAT_SS"
+        enabled: true
+      - name: "qtsdatacenters"
+        url: "https://qtsdatacenters.wd5.myworkdayjobs.com/en-US/qts"
+        enabled: true
+      - name: "richmond"
+        url: "https://richmond.wd5.myworkdayjobs.com/staff_faculty"
+        enabled: true
+      - name: "sci"
+        url: "https://sci.wd5.myworkdayjobs.com/SCI"
+        enabled: true
+      - name: "scripps"
+        url: "https://scripps.wd5.myworkdayjobs.com/Scripps_Careers"
+        enabled: true
+      - name: "sonoco"
+        url: "https://sonoco.wd1.myworkdayjobs.com/en-US/CorporateCareers"
+        enabled: true
+      - name: "vacu"
+        url: "https://vacu.wd1.myworkdayjobs.com/VACU_Careers?jobFamilyGroup=7701a7cf554a0101b6e137cc26780000"
+        enabled: true
+      - name: "xylem"
+        url: "https://xylem.wd5.myworkdayjobs.com/xylem-careers"
+        enabled: true
+
+  # ApplicantPro Sites
+  - group: "applicantpro"
+    type: "standard"
+    enabled: true
+    selectors:
+      job_link: ".listing-url"
+      next_page: null
+      next_page_disabled: null
+    sites:
+      - name: "cobbtechnologies"
+        url: "https://cobbtechnologies.applicantpro.com/jobs/"
+        enabled: true
+      - name: "thalhimer"
+        url: "https://thalhimer.applicantpro.com/jobs/"
+        enabled: true
+      - name: "ymcarichmond"
+        url: "https://ymcarichmond.applicantpro.com/jobs/"
+        enabled: true
+
+  # iCIMS Sites (Iframe-based)
+  - group: "icims"
+    type: "iframe"
+    enabled: true
+    selectors:
+      iframe: 'iframe[id="icims_content_iframe"]'
+      job_link: 'a.iCIMS_Anchor'
+      job_link_filter: |
+        (el) => el.href && el.href.includes('/jobs/') && el.querySelector('h3')
+      next_page: 'a.iCIMS_Pagination_Bottom-next'
+      next_page_disabled_check: |
+        (el) => {
+          const style = window.getComputedStyle(el);
+          return el.classList.contains('disabled') ||
+                 el.classList.contains('iCIMS_Pagination_Bottom-next-disabled') ||
+                 style.display === "none" ||
+                 style.visibility === "hidden" ||
+                 !el.offsetParent ||
+                 el.getAttribute('aria-disabled') === 'true';
+        }
+    sites:
+      - name: "audacy"
+        url: "https://careers-audacy.icims.com/jobs/search?ss=1"
+        enabled: true
+      - name: "chesbank"
+        url: "https://careers-chesbank.icims.com/jobs/search?ss=1"
+        enabled: true
+      - name: "dewberry"
+        url: "https://careers-dewberry.icims.com/jobs/search?ss=1"
+        enabled: true
+      - name: "gilbaneco"
+        url: "https://careers-gilbaneco.icims.com/jobs/search?ss=1"
+        enabled: true
+
+  # CareerPlug Sites (URL-based pagination)
+  - group: "careerplug"
+    type: "url_pagination"
+    enabled: true
+    selectors:
+      job_table: '#job_table'
+      job_link: 'a'
+    settings:
+      url_pattern: "{base_url}?page={page_num}"
+      start_page: 1
+      wait_between_pages_min: 3
+      wait_between_pages_max: 9
+    sites:
+      - name: "call-federal"
+        url: "https://call-federal-credit-union.careerplug.com/jobs"
+        enabled: true
+      - name: "goddard-school"
+        url: "https://the-goddard-school-careers.careerplug.com/jobs"
+        enabled: true
+
+  # ADP Sites (Custom click-through)
+  - group: "adp"
+    type: "custom_click"
+    enabled: true
+    selectors:
+      view_all_button: '#recruitment_careerCenter_showAllJobs'
+      job_button: 'sdf-button[id^="lblTitle_"]'
+      back_button: '#recruitment_jobDescription_back'
+      container: '.current-openings-details'
+    settings:
+      max_consecutive_errors: 8
+      click_back_after_job: true
+      click_view_all_after_back: true
+    sites:
+      - name: "adp_site1"
+        url: "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=1a28f084-a840-489f-a837-e68fd3bb5078&ccId=1215116661_159&lang=en_US"
+        enabled: true
+      - name: "adp_site2"
+        url: "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=3be72b98-ef48-44d6-a55f-809db03ac7bc&ccId=19000101_000001&type=MP&lang=en_US"
+        enabled: true
+
+  # Virginia State Jobs (Custom navigation)
+  - group: "virginia"
+    type: "custom_navigation"
+    enabled: true
+    selectors:
+      job_link: '.job-search-results-title a'
+      next_page: 'li.next.next_page a'
+      cookie_modal_class: "consent-modal"
+    settings:
+      base_url: "https://www.jobs.virginia.gov"
+      handle_cookies: true
+    sites:
+      - name: "virginia"
+        url: "https://www.jobs.virginia.gov/jobs/search?page=1&cities%5B%5D=Richmond&query="
+        enabled: true
