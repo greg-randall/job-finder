@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from config_loader import get_config
-from functions import init_browser, navigate_with_retries, download_all_links, DownloadStats
+from functions import init_browser, navigate_with_retries, download_all_links, DownloadStats, wait_for_selector
 from logging_config import ScraperLogger, get_logger
 
 
@@ -112,6 +112,17 @@ class BaseScraper(ABC):
         try:
             self.tab = await self.browser.get(self.url)
             self.logger.info("Successfully loaded job board")
+
+            # Wait for job links to be present after navigation
+            job_link_selector = self.selectors.get('job_link')
+            if job_link_selector:
+                self.logger.debug(f"Waiting for initial job links: {job_link_selector}")
+                await wait_for_selector(
+                    self.tab,
+                    job_link_selector,
+                    logger=self.logger
+                )
+
             return True
         except Exception as e:
             self.logger.error(f"Failed to load the page: {self.url}: {str(e)}")

@@ -129,7 +129,7 @@ class ScraperLogger:
         error_type: str,
         error_message: str,
         url: Optional[str] = None,
-        page: Optional[Any] = None,  # Playwright page object
+        page: Optional[Any] = None,  # nodriver Tab object
         stack_trace: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -140,7 +140,7 @@ class ScraperLogger:
             error_type: Type of error (e.g., 'NavigationError', 'SelectorError')
             error_message: Human-readable error message
             url: URL where error occurred
-            page: Playwright page object (for HTML dump and screenshot)
+            page: nodriver Tab object (for HTML dump and screenshot)
             stack_trace: Full stack trace
             context: Additional context dictionary
 
@@ -164,8 +164,8 @@ class ScraperLogger:
         # Capture HTML dump and screenshot if page is available
         if page:
             try:
-                # Get HTML content
-                html_content = await page.content()
+                # Get HTML content (nodriver uses evaluate for this)
+                html_content = await page.evaluate('document.documentElement.outerHTML')
                 html_file = self.error_dir / f"{timestamp_str}_page_dump.html"
                 with open(html_file, 'w', encoding='utf-8') as f:
                     f.write(html_content)
@@ -180,9 +180,9 @@ class ScraperLogger:
                 self.logger.warning(f"Failed to capture HTML: {e}")
 
             try:
-                # Capture screenshot
+                # Capture screenshot (nodriver uses save_screenshot)
                 screenshot_file = self.error_dir / f"{timestamp_str}_screenshot.png"
-                await page.screenshot(path=str(screenshot_file), full_page=True)
+                await page.save_screenshot(str(screenshot_file))
                 error_data["screenshot_file"] = str(screenshot_file)
                 self.logger.debug(f"Captured screenshot: {screenshot_file}")
             except Exception as e:

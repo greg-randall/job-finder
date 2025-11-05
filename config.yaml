@@ -100,6 +100,8 @@ browser:
     cookie_click_ms: 2000
     modal_close_wait_ms: 1000
     wait_for_load_ms: 2000
+    element_wait_ms: 20000      # Maximum time to wait for elements to appear
+    element_poll_ms: 500        # Polling interval for checking element presence
     selenium_timeout_sec: 20
 
   retries:

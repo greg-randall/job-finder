@@ -489,6 +489,66 @@ async def wait_for_load(tab, timeout: int = Timeouts.WAIT_FOR_LOAD) -> None:
         print(f"Error waiting for page load: {str(e)}")
 
 
+async def wait_for_selector(
+    tab,
+    selector: str,
+    timeout: int = None,
+    poll_interval: int = None,
+    logger = None
+) -> bool:
+    """
+    Wait for an element matching the selector to appear in the DOM.
+
+    This function polls the page at regular intervals checking if the selector
+    matches any elements. It's essential for waiting for dynamically loaded
+    content in JavaScript-heavy sites.
+
+    Args:
+        tab: nodriver Tab object.
+        selector: CSS selector to wait for.
+        timeout: Maximum time to wait in milliseconds. Defaults to config value.
+        poll_interval: How often to check for element in milliseconds. Defaults to config value.
+        logger: Optional logger instance for debug messages.
+
+    Returns:
+        True if element found within timeout, False otherwise.
+    """
+    # Get defaults from config if not specified
+    if timeout is None:
+        timeout = _config.get('browser.timeouts.element_wait_ms', 20000) if _use_config else 20000
+    if poll_interval is None:
+        poll_interval = _config.get('browser.timeouts.element_poll_ms', 500) if _use_config else 500
+
+    start_time = 0
+    timeout_seconds = timeout / 1000
+    poll_seconds = poll_interval / 1000
+
+    try:
+        while start_time < timeout_seconds:
+            # Check if element exists
+            element = await tab.select(selector)
+            if element:
+                if logger:
+                    logger.debug(f"Element found: {selector} (waited {start_time:.1f}s)")
+                return True
+
+            # Wait before next check
+            await tab.sleep(poll_seconds)
+            start_time += poll_seconds
+
+        # Timeout reached
+        if logger:
+            logger.warning(f"Timeout waiting for element: {selector} (waited {timeout_seconds}s)")
+        return False
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Error waiting for selector '{selector}': {str(e)}")
+        else:
+            print(f"Error waiting for selector '{selector}': {str(e)}")
+        return False
+
+
 # ============================================================================
 # CONTENT DOWNLOAD FUNCTIONS
 # ============================================================================

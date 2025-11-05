@@ -7,7 +7,7 @@ boards that use standard pagination with next/previous buttons.
 
 from typing import List
 
-from functions import wait_for_load
+from functions import wait_for_load, wait_for_selector
 from scrapers.base_scraper import BaseScraper
 
 
@@ -34,10 +34,57 @@ class StandardScraper(BaseScraper):
             return []
 
         try:
-            links = await self.tab.evaluate(f'''() => {{
-                const elements = document.querySelectorAll('{job_link_selector}');
-                return Array.from(elements).map(el => el.href).filter(href => href);
-            }}''')
+            # Wait for job link elements to appear before extracting
+            self.logger.debug(f"Waiting for job links to load: {job_link_selector}")
+            element_found = await wait_for_selector(
+                self.tab,
+                job_link_selector,
+                logger=self.logger
+            )
+
+            if not element_found:
+                self.logger.warning(f"Job link elements did not load within timeout: {job_link_selector}")
+                # Continue anyway to capture error context
+
+            # Use nodriver's native select_all method instead of evaluate
+            try:
+                # Get all matching elements using nodriver's native method
+                elements = await self.tab.select_all(job_link_selector)
+                self.logger.debug(f"select_all returned: {type(elements)}, len={len(elements) if elements else 0}")
+
+                if elements:
+                    # Get the base URL
+                    base_url = await self.tab.evaluate('window.location.origin')
+
+                    # Extract href from each element
+                    links = []
+                    for i, element in enumerate(elements):
+                        try:
+                            # Get href using direct property access
+                            href = element.href
+                            self.logger.debug(f"Element {i}: type={type(element)}, href={href}")
+                            if href:
+                                # href is already a relative URL, convert to absolute
+                                if href.startswith('http'):
+                                    links.append(href)
+                                else:
+                                    # Ensure we don't double-add slashes
+                                    if href.startswith('/'):
+                                        links.append(f"{base_url}{href}")
+                                    else:
+                                        links.append(f"{base_url}/{href}")
+                        except Exception as e:
+                            self.logger.debug(f"Error getting href from element {i}: {str(e)}")
+                            import traceback
+                            self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                            continue
+                else:
+                    self.logger.debug("select_all returned None or empty list")
+                    links = []
+
+            except Exception as extract_error:
+                self.logger.error(f"Error extracting job links: {str(extract_error)}")
+                links = []
 
             self.logger.debug(f"Extracted {len(links)} job links using selector: {job_link_selector}")
 
