@@ -36,7 +36,7 @@ class StandardScraper(BaseScraper):
         try:
             links = await self.page.evaluate(f'''() => {{
                 const elements = document.querySelectorAll('{job_link_selector}');
-                return Array.from(elements).map(el => el.href);
+                return Array.from(elements).map(el => el.href).filter(href => href);
             }}''')
 
             self.logger.debug(f"Extracted {len(links)} job links using selector: {job_link_selector}")

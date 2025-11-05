@@ -714,7 +714,12 @@ def _generate_cache_filename(name: str, url: str) -> Path:
 
     Returns:
         Path object for the cache file.
+
+    Raises:
+        ValueError: If url is None or empty.
     """
+    if not url:
+        raise ValueError(f"Cannot generate cache filename: URL is {url!r}")
     url_hash = hashlib.sha256(url.encode()).hexdigest()
     filename = f"{name}_{url_hash}.txt"
     return Paths.CACHE_DIR / filename
@@ -827,8 +832,18 @@ async def download_all_links(
     Returns:
         DownloadStats object with download statistics.
     """
+    # Filter out None/empty URLs and log warning
+    valid_links = [link for link in links if link]
+    invalid_count = len(links) - len(valid_links)
+
+    if invalid_count > 0:
+        if logger:
+            logger.warning(f"Filtered out {invalid_count} invalid (None/empty) URLs from link list")
+        else:
+            print(f"Warning: Filtered out {invalid_count} invalid URLs")
+
     # Shuffle links for randomization
-    links_list = list(links)
+    links_list = list(valid_links)
     secrets.SystemRandom().shuffle(links_list)
 
     # Ensure cache directory exists
