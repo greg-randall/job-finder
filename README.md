@@ -1,80 +1,90 @@
 # Job Scraper and Matcher
 
-This project is a collection of Python scripts designed to scrape job postings from various websites, process them, and rate them against a candidate's resume and cover letter using the OpenAI API.
+This project is a sophisticated, configuration-driven framework for scraping job postings from various websites, processing them, and rating them against a candidate's resume using the OpenAI API.
+
+## Key Features
+
+- **Centralized Configuration**: All settings are managed in `config.yaml`, allowing for easy updates without code changes.
+- **Unified Scraper Architecture**: A flexible architecture supports different types of job boards through a factory pattern.
+- **Single Entry Point**: `run_scrapers.py` script to run all or specific scrapers.
+- **AI-Powered Job Matching**: `process_jobs.py` uses an AI model to rate and rank jobs based on your resume.
+- **Extensible**: Easily add new job boards by updating the `config.yaml` file.
 
 ## Project Structure
 
-The project is organized into several key files:
+The project is organized into several key components:
 
-- **`functions.py`**: A utility module containing common functions used across the different scrapers. This includes functions for:
-    - Initializing a web browser (Playwright and Selenium) with anti-detection measures.
-    - Navigating to web pages with retry logic.
-    - Handling cookie consent modals.
-    - Downloading and caching web page content.
-    - Interacting with the OpenAI API to process text.
-
-- **`process_jobs.py`**: The core script for processing and rating job postings. It performs the following steps:
-    1. Reads cached job postings from the `cache/` directory.
-    2. For each job, it calls the OpenAI API to evaluate how well the job description matches the candidate's resume and cover letter.
-    3. The evaluation includes an overall rating and individual scores for experience, education, skills, and interest.
-    4. The results are saved to a `processed_jobs.csv` file.
-    5. It can also generate ranked lists of jobs based on the evaluation scores.
-
-- **`scraper_*.py`**: Each of these files is a dedicated scraper for a specific job board or platform (e.g., `scraper_workday.py`, `scraper_linkedin.py`). These scripts use the functions from `functions.py` to:
-    - Navigate to the target job board.
-    - Find and extract links to individual job postings.
-    - Download the content of each job posting and save it to the `cache/` directory for later processing.
-
-- **`cache/`**: A directory where the raw HTML content of scraped job postings is stored. This prevents the need to re-download the same job posting multiple times.
-
+- **`config.yaml`**: The central configuration file for all settings, including job boards, API keys, and processing parameters.
+- **`config_loader.py`**: A module for loading and accessing settings from `config.yaml`.
+- **`run_scrapers.py`**: The main entry point for executing the job scrapers.
+- **`process_jobs.py`**: The script for processing cached job postings and rating them with an AI model.
+- **`scrapers/`**: This directory contains the modern, class-based scraper architecture.
+    - **`base_scraper.py`**: The abstract base class that provides common functionality for all scrapers.
+    - **`scraper_factory.py`**: A factory for creating scraper instances based on the configuration.
+    - **`standard_scraper.py`, `iframe_scraper.py`, etc.**: Concrete scraper implementations for different types of job boards.
+- **`legacy_scrapers/`**: Contains the original scraper scripts, which are still functional but deprecated.
+- **`functions.py`**: A utility module with common functions for web scraping and API interaction.
+- **`logging_config.py`**: Configures structured logging for the application.
+- **`cache/`**: A directory where the raw HTML content of scraped job postings is stored.
 - **`processed_jobs.csv`**: The output CSV file containing the processed and rated job postings.
 
 ## How it Works
 
-1. **Scraping**: The `scraper_*.py` scripts are run to gather job postings from various websites. They navigate through job listings, collect links to individual jobs, and save the HTML content of each job page into the `cache/` directory.
+1.  **Configuration**: Define the job boards you want to scrape and other settings in the `config.yaml` file. You can enable or disable scrapers, set API keys, and adjust job rating criteria.
+2.  **Scraping**: Run the `run_scrapers.py` script to collect job postings. The script uses the configuration in `config.yaml` to determine which sites to scrape.
+    ```bash
+    # Run all enabled scrapers
+    python run_scrapers.py
 
-2. **Processing**: The `process_jobs.py` script is then run to analyze the scraped jobs. It reads the cached HTML files, extracts the relevant text from each job description, and sends it to the OpenAI API along with the candidate's resume and cover letter.
-
-3. **Rating**: The OpenAI API, using a powerful language model like GPT-4, evaluates the job description against the candidate's documents and returns a structured JSON object with ratings for different categories (experience, education, skills, interest) and other relevant information like job title, company, location, and salary.
-
-4. **Output**: The processed data, including the ratings, is saved in the `processed_jobs.csv` file. This file can then be used to identify the most promising job opportunities.
+    # Run a specific group of scrapers
+    python run_scrapers.py --group workday
+    ```
+3.  **Processing**: After scraping, run the `process_jobs.py` script to analyze the collected jobs. This script reads the cached job postings, extracts the relevant text, and sends it to the OpenAI API along with your resume.
+    ```bash
+    # Process all cached jobs
+    python process_jobs.py
+    ```
+4.  **Rating**: The AI model evaluates each job description against your resume and returns a structured set of ratings for experience, education, skills, and interest.
+5.  **Output**: The processed data, including the ratings, is saved to `processed_jobs.csv`. The script also generates ranked lists of jobs to help you identify the most promising opportunities.
 
 ## Dependencies
 
-This project relies on several Python libraries for web scraping, data processing, and interacting with the OpenAI API. The main dependencies include:
+This project relies on several Python libraries. You can install them using pip:
 
-- `openai`: For interacting with the OpenAI API.
-- `playwright` and `selenium`: For web browser automation and scraping.
-- `beautifulsoup4` and `trafilatura`: For parsing HTML and extracting content.
-- `pandas`: For data manipulation and creating CSV files.
-- `geopy`: For geocoding and location-based filtering.
-- `tqdm`: For displaying progress bars.
+```bash
+pip install openai playwright selenium beautifulsoup4 trafilatura pandas geopy tqdm pyyaml undetected-chromedriver aiofiles python-dotenv pyppeteer pyppeteer-stealth termcolor
+```
+
+You also need to install the Playwright browser dependencies:
+
+```bash
+playwright install
+```
 
 ## Usage
 
-1. **Installation**: Install the required Python libraries using pip:
-   ```bash
-   pip install openai playwright selenium beautifulsoup4 trafilatura pandas geopy tqdm undetected-chromedriver aiofiles python-dotenv pyppeteer pyppeteer-stealth termcolor
-   ```
+1.  **Installation**: Install the required Python libraries as described above.
+2.  **Configuration**:
+    -   Create a `.env` file in the root directory and add your OpenAI API key:
+        ```
+        OPENAI_API_KEY="your_openai_api_key"
+        ```
+    -   Update `config.yaml` to specify the job boards you want to scrape. You can enable/disable sites and groups by setting the `enabled` flag to `true` or `false`.
+    -   Place your resume file (e.g., `resume.md`) in the root directory and ensure the path is correctly set in `config.yaml`.
+3.  **Scraping**: Run the `run_scrapers.py` script to start collecting job postings.
+    ```bash
+    # Run all enabled scrapers
+    python run_scrapers.py
 
-2. **Configuration**:
-   - Create a `.env` file in the root directory and add your OpenAI API key:
-     ```
-     OPENAI_API_KEY="your_openai_api_key"
-     ```
-   - Place your resume and cover letter files (e.g., `resume.md`, `cover_letter.md`) in the root directory.
-
-3. **Scraping**: Run the desired scraper scripts to collect job postings:
-   ```bash
-   python scraper_linkedin.py
-   python scraper_workday.py
-   # ... and so on for other scrapers
-   ```
-
-4. **Processing**: After scraping, run the `process_jobs.py` script to rate the collected jobs:
-   ```bash
-   python process_jobs.py --resume resume.md --cover-letter cover_letter.md
-   ```
-   You can use various command-line arguments to customize the processing, such as `--max-jobs` to limit the number of jobs processed or `--force` to re-process already rated jobs.
-
-5. **Review Results**: Open the `processed_jobs.csv` file to see the rated job postings. You can also check the `ranked_jobs.csv` and `high_quality_matches_*.csv` files for filtered and ranked lists of jobs.
+    # To see a list of all available scrapers
+    python run_scrapers.py --list
+    ```
+4.  **Processing**: After scraping is complete, run the `process_jobs.py` script to rate the collected jobs.
+    ```bash
+    python process_jobs.py
+    ```
+    You can customize the processing with various command-line arguments. For example, to force reprocessing of all jobs:
+    ```bash
+    python process_jobs.py --force
+    ```
+5.  **Review Results**: Open `processed_jobs.csv` to see the rated job postings. You can also check the `ranked_jobs.csv` and `high_quality_matches_*.csv` files for filtered and ranked lists of jobs.
