@@ -18,13 +18,27 @@ from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from functools import lru_cache
 
-# Richmond's coordinates
-RICHMOND_COORDS = (37.5407, -77.4360)
+# Import config loader
+from config_loader import get_config, get_openai_api_key
 
-# Get OpenAI API key from environment variables
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-if not openai.api_key:
-    raise ValueError("OPENAI_API_KEY environment variable is not set")
+# Load configuration
+config = get_config()
+
+# Get coordinates from config
+location_config = config.get_location_config()
+RICHMOND_COORDS = (
+    location_config.get('coordinates', {}).get('latitude', 37.5407),
+    location_config.get('coordinates', {}).get('longitude', -77.4360)
+)
+
+# Get OpenAI API key from environment variables via config
+try:
+    openai.api_key = get_openai_api_key()
+except ValueError as e:
+    # Fallback to old behavior if config not available
+    openai.api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai.api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
 
 def load_document(file_path):
     """Load a document from a file path."""
@@ -966,25 +980,30 @@ def repair_processed_jobs_csv(csv_path):
 
 # Example usage in the main function
 if __name__ == "__main__":
-    # Parse command-line arguments
+    # Get config defaults
+    paths_config = config.get_paths_config()
+    rating_config = config.get_rating_config()
+    processing_config = config.get_processing_config()
+
+    # Parse command-line arguments (with defaults from config)
     parser = argparse.ArgumentParser(description='Process job listings and rate them against a resume and optionally a cover letter')
-    parser.add_argument('--resume', type=str, default='resume.md', help='Path to the resume file')
-    parser.add_argument('--cover-letter', type=str, default=None, help='Path to the cover letter file (optional)')
-    parser.add_argument('--max-jobs', type=int, default=None, help='Maximum number of jobs to process')
-    parser.add_argument('--debug', action='store_true', help='Enable debug output')
-    parser.add_argument('--force', action='store_true', help='Force reprocessing of already processed jobs')
-    parser.add_argument('--parallel', type=int, default=32, help='Number of parallel requests to make (default: 32)')
+    parser.add_argument('--resume', type=str, default=paths_config.get('resume', 'resume.md'), help='Path to the resume file')
+    parser.add_argument('--cover-letter', type=str, default=paths_config.get('cover_letter'), help='Path to the cover letter file (optional)')
+    parser.add_argument('--max-jobs', type=int, default=processing_config.get('max_jobs'), help='Maximum number of jobs to process')
+    parser.add_argument('--debug', action='store_true', default=processing_config.get('debug', False), help='Enable debug output')
+    parser.add_argument('--force', action='store_true', default=processing_config.get('force_reprocess', False), help='Force reprocessing of already processed jobs')
+    parser.add_argument('--parallel', type=int, default=processing_config.get('parallel_workers', 32), help='Number of parallel requests to make')
     parser.add_argument('--repair-csv', action='store_true', help='Repair the processed_jobs.csv file to fix formatting issues')
     parser.add_argument('--fix-csv', action='store_true', help='Fix the processed_jobs.csv file to correct field count issues')
-    parser.add_argument('--high-quality-threshold', type=float, default=6.0, help='Threshold for high-quality matches (0-10)')
-    parser.add_argument('--min-category-score', type=int, default=5, help='Minimum score required for each category (experience, education, skills, interest) to be considered high-quality (default: 6)')
-    parser.add_argument('--exp-weight', type=float, default=0.3, help='Weight for experience match (0-1)')
-    parser.add_argument('--edu-weight', type=float, default=0.2, help='Weight for education match (0-1)')
-    parser.add_argument('--skills-weight', type=float, default=0.2, help='Weight for skills match (0-1)')
-    parser.add_argument('--interest-weight', type=float, default=0.3, help='Weight for interest match (0-1)')
-    parser.add_argument('--all-locations', action='store_false', dest='richmond_or_remote_only', 
+    parser.add_argument('--high-quality-threshold', type=float, default=rating_config.get('thresholds', {}).get('high_quality', 6.0), help='Threshold for high-quality matches (0-10)')
+    parser.add_argument('--min-category-score', type=int, default=rating_config.get('thresholds', {}).get('min_category_score', 5), help='Minimum score required for each category')
+    parser.add_argument('--exp-weight', type=float, default=rating_config.get('weights', {}).get('experience', 0.35), help='Weight for experience match (0-1)')
+    parser.add_argument('--edu-weight', type=float, default=rating_config.get('weights', {}).get('education', 0.15), help='Weight for education match (0-1)')
+    parser.add_argument('--skills-weight', type=float, default=rating_config.get('weights', {}).get('skills', 0.35), help='Weight for skills match (0-1)')
+    parser.add_argument('--interest-weight', type=float, default=rating_config.get('weights', {}).get('interest', 0.15), help='Weight for interest match (0-1)')
+    parser.add_argument('--all-locations', action='store_false', dest='richmond_or_remote_only',
                     help='Include all locations, not just remote or near Richmond')
-    parser.set_defaults(richmond_or_remote_only=True)
+    parser.set_defaults(richmond_or_remote_only=processing_config.get('richmond_or_remote_only', True))
     args = parser.parse_args()
     
     # Create weights dictionary from command line arguments

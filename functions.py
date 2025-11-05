@@ -30,42 +30,58 @@ from logging_config import ScraperLogger, setup_simple_logger
 # Load environment variables
 load_dotenv()
 
+# Import config loader - load config at module import time
+try:
+    from config_loader import get_config
+    _config = get_config()
+    _use_config = True
+except Exception:
+    # Fallback if config not available
+    _config = None
+    _use_config = False
+
 
 # ============================================================================
-# CONSTANTS
+# CONSTANTS (Loaded from config.yaml when available)
 # ============================================================================
 
 class Timeouts:
     """Centralized timeout configuration (in milliseconds unless noted)."""
-    PAGE_LOAD = 20000
-    NETWORK_IDLE = 20000
-    DEFAULT_CONTEXT = 60000
-    BROWSER_LAUNCH = 300000  # 5 minutes
-    COOKIE_CLICK = 2000
-    MODAL_CLOSE_WAIT = 1000
-    WAIT_FOR_LOAD = 2000
-    SELENIUM_TIMEOUT = 20  # seconds
+    PAGE_LOAD = _config.get('browser.timeouts.page_load_ms', 20000) if _use_config else 20000
+    NETWORK_IDLE = _config.get('browser.timeouts.network_idle_ms', 20000) if _use_config else 20000
+    DEFAULT_CONTEXT = _config.get('browser.timeouts.default_context_ms', 60000) if _use_config else 60000
+    BROWSER_LAUNCH = _config.get('browser.timeouts.browser_launch_ms', 300000) if _use_config else 300000
+    COOKIE_CLICK = _config.get('browser.timeouts.cookie_click_ms', 2000) if _use_config else 2000
+    MODAL_CLOSE_WAIT = _config.get('browser.timeouts.modal_close_wait_ms', 1000) if _use_config else 1000
+    WAIT_FOR_LOAD = _config.get('browser.timeouts.wait_for_load_ms', 2000) if _use_config else 2000
+    SELENIUM_TIMEOUT = _config.get('browser.timeouts.selenium_timeout_sec', 20) if _use_config else 20
 
 
 class Paths:
     """Centralized path configuration."""
-    CACHE_DIR = Path('cache')
+    CACHE_DIR = Path(_config.get('paths.cache_dir', 'cache')) if _use_config else Path('cache')
 
 
 class Limits:
     """Centralized limit configuration."""
-    MAX_RETRIES = 3
-    MAX_CONSECUTIVE_ERRORS = 8
+    MAX_RETRIES = _config.get('browser.retries.max_retries', 3) if _use_config else 3
+    MAX_CONSECUTIVE_ERRORS = _config.get('browser.retries.max_consecutive_errors', 8) if _use_config else 8
 
 
 class UserAgents:
     """User agent strings."""
-    CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    CHROME = _config.get('browser.user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36') if _use_config else 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
 
 
 class Resolutions:
     """Common screen resolutions."""
-    COMMON = [
+    COMMON = _config.get('browser.resolutions', [
+        {'width': 1920, 'height': 1080},
+        {'width': 1366, 'height': 768},
+        {'width': 1536, 'height': 864},
+        {'width': 1440, 'height': 900},
+        {'width': 1280, 'height': 720}
+    ]) if _use_config else [
         {'width': 1920, 'height': 1080},
         {'width': 1366, 'height': 768},
         {'width': 1536, 'height': 864},
@@ -76,7 +92,14 @@ class Resolutions:
 
 class CookieSelectors:
     """Common cookie consent button selectors."""
-    SELECTORS = [
+    SELECTORS = _config.get('browser.cookie_selectors', [
+        'button[data-action="init--explicit-consent-modal#accept"]',
+        'button[aria-label*="accept" i]',
+        'button:has-text("Accept")',
+        'button:has-text("I agree")',
+        '.accept-cookies',
+        '#accept-cookies'
+    ]) if _use_config else [
         'button[data-action="init--explicit-consent-modal#accept"]',
         'button[aria-label*="accept" i]',
         'button:has-text("Accept")',
