@@ -48,7 +48,8 @@ async def main():
             logger.info("No more next button found")
             break
 
-        next_url = await next_button.get_attribute('href')
+        # Get href from element attributes (synchronous in nodriver)
+        next_url = next_button.attrs.get('href')
         if not next_url:
             logger.info("Could not get next page URL")
             break

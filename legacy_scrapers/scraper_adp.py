@@ -124,7 +124,8 @@ async def scrape_adp_site(url, logger=None):
 
         button_ids = []
         for button in job_buttons:
-            button_id = await button.get_attribute('id')
+            # Get id from element attributes (synchronous in nodriver)
+            button_id = button.attrs.get('id')
             button_ids.append(button_id)
 
         processed_jobs = set()
@@ -137,7 +138,8 @@ async def scrape_adp_site(url, logger=None):
 
             try:
                 job_id = button_id.split('_')[1]
-                job_title = await button.get_attribute('aria-label')
+                # Get aria-label from element attributes (synchronous in nodriver)
+                job_title = button.attrs.get('aria-label')
 
                 if job_id in processed_jobs:
                     print(f"Already processed in this session: {job_title}")

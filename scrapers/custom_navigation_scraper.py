@@ -61,15 +61,24 @@ class CustomNavigationScraper(BaseScraper):
             return []
 
         try:
-            job_links = await self.tab.evaluate(f'''() => {{
-                const elements = document.querySelectorAll('{job_link_selector}');
-                return Array.from(elements).map(el => el.href);
-            }}''')
+            # Note: nodriver evaluate() without function wrapper returns direct results
+            job_links_raw = await self.tab.evaluate(f'''
+                Array.from(document.querySelectorAll('{job_link_selector}')).map(el => el.href)
+            ''')
 
             # Handle case where evaluate returns None
-            if job_links is None:
+            if job_links_raw is None:
                 self.logger.warning(f"Job link extraction returned None for selector: {job_link_selector}")
                 return []
+
+            # Parse nodriver's CDP response format (list of Result objects)
+            # Each item might be a dict with 'value' key or a plain string
+            job_links = []
+            for item in job_links_raw:
+                if isinstance(item, dict) and 'value' in item:
+                    job_links.append(item['value'])
+                elif isinstance(item, str):
+                    job_links.append(item)
 
             # Add to set for deduplication
             self.all_job_links.update(job_links)
@@ -105,16 +114,15 @@ class CustomNavigationScraper(BaseScraper):
             self.logger.info("No more next button found")
             return False
 
-        # Check if next_button has get_attribute method (valid element)
-        if not hasattr(next_button, 'get_attribute') or not callable(getattr(next_button, 'get_attribute', None)):
-            self.logger.warning(f"Next button element does not have get_attribute method: {type(next_button)}")
-            return False
-
-        # Get next page URL
+        # Get href from element attributes (synchronous in nodriver)
         try:
-            next_url = await next_button.get_attribute('href')
+            if not next_button.attrs or 'href' not in next_button.attrs:
+                self.logger.info("Next button does not have href attribute")
+                return False
+
+            next_url = next_button.attrs.get('href')
         except Exception as e:
-            self.logger.error(f"Error getting href attribute from next button: {e}")
+            self.logger.error(f"Error getting href attribute: {e}")
             return False
 
         if not next_url:

@@ -134,7 +134,7 @@ class CustomClickScraper(BaseScraper):
         # Collect button IDs for iteration
         button_ids = []
         for button in job_buttons:
-            button_id = await button.get_attribute('id')
+            button_id = button.attrs.get('id')
             if button_id:
                 button_ids.append(button_id)
 
@@ -148,8 +148,8 @@ class CustomClickScraper(BaseScraper):
             try:
                 # Extract job info
                 job_id = button_id.split('_')[1] if '_' in button_id else button_id
-                # In nodriver, get_attribute is available on elements
-                job_title_attr = await button.get_attribute('aria-label')
+                # Get aria-label from element attributes (synchronous in nodriver)
+                job_title_attr = button.attrs.get('aria-label')
                 job_title = job_title_attr or f"Job {job_id}"
 
                 # Check if already processed in this session
