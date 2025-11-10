@@ -11,9 +11,10 @@ Provides structured logging with:
 import logging
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from logging.handlers import RotatingFileHandler
 
 
@@ -124,6 +125,68 @@ class ScraperLogger:
         self.add_breadcrumb(f"CRITICAL: {message}")
         self.stats["errors"] += 1
 
+    @staticmethod
+    def clean_html_for_debugging(html_content: str) -> Tuple[str, Dict[str, int]]:
+        """
+        Clean HTML content by removing scripts, styles, and inline styles.
+
+        Args:
+            html_content: Raw HTML content
+
+        Returns:
+            Tuple of (cleaned_html, statistics_dict)
+        """
+        stats = {
+            'script_tags_removed': 0,
+            'script_chars_removed': 0,
+            'style_tags_removed': 0,
+            'style_chars_removed': 0,
+            'inline_styles_removed': 0
+        }
+
+        # Remove script tags and count them
+        script_pattern = re.compile(r'<script\b[^>]*>.*?</script>', re.IGNORECASE | re.DOTALL)
+        scripts = script_pattern.findall(html_content)
+        stats['script_tags_removed'] = len(scripts)
+        stats['script_chars_removed'] = sum(len(s) for s in scripts)
+        cleaned = script_pattern.sub('', html_content)
+
+        # Remove style tags and count them
+        style_pattern = re.compile(r'<style\b[^>]*>.*?</style>', re.IGNORECASE | re.DOTALL)
+        styles = style_pattern.findall(cleaned)
+        stats['style_tags_removed'] = len(styles)
+        stats['style_chars_removed'] = sum(len(s) for s in styles)
+        cleaned = style_pattern.sub('', cleaned)
+
+        # Remove inline style attributes and count them
+        inline_style_pattern = re.compile(r'\s+style\s*=\s*["\'][^"\']*["\']', re.IGNORECASE)
+        inline_styles = inline_style_pattern.findall(cleaned)
+        stats['inline_styles_removed'] = len(inline_styles)
+        cleaned = inline_style_pattern.sub('', cleaned)
+
+        # Add summary comment at the top
+        summary_lines = []
+        if stats['script_tags_removed'] > 0:
+            summary_lines.append(
+                f"<!-- Removed {stats['script_tags_removed']} <script> tag(s) "
+                f"({stats['script_chars_removed']:,} characters of JavaScript) -->"
+            )
+        if stats['style_tags_removed'] > 0:
+            summary_lines.append(
+                f"<!-- Removed {stats['style_tags_removed']} <style> tag(s) "
+                f"({stats['style_chars_removed']:,} characters of CSS) -->"
+            )
+        if stats['inline_styles_removed'] > 0:
+            summary_lines.append(
+                f"<!-- Removed {stats['inline_styles_removed']} inline style attribute(s) -->"
+            )
+
+        if summary_lines:
+            summary = '\n'.join(summary_lines) + '\n\n'
+            cleaned = summary + cleaned
+
+        return cleaned, stats
+
     async def capture_error_context(
         self,
         error_type: str,
@@ -164,17 +227,29 @@ class ScraperLogger:
         # Capture HTML dump and screenshot if page is available
         if page:
             try:
-                # Get HTML content (nodriver uses evaluate for this)
-                html_content = await page.evaluate('document.documentElement.outerHTML')
+                # Get body HTML content only (more relevant for debugging)
+                raw_html = await page.evaluate('document.body ? document.body.innerHTML : document.documentElement.outerHTML')
+
+                # Clean the HTML to remove noise
+                cleaned_html, cleaning_stats = self.clean_html_for_debugging(raw_html)
+
+                # Save cleaned HTML
                 html_file = self.error_dir / f"{timestamp_str}_page_dump.html"
                 with open(html_file, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
+                    f.write(cleaned_html)
 
                 error_data["html_dump_file"] = str(html_file)
-                error_data["html_preview"] = html_content[:500] + "..." if len(html_content) > 500 else html_content
-                error_data["html_size_bytes"] = len(html_content)
+                error_data["html_preview"] = cleaned_html[:500] + "..." if len(cleaned_html) > 500 else cleaned_html
+                error_data["html_size_bytes"] = len(cleaned_html)
+                error_data["html_cleaning_stats"] = cleaning_stats
 
                 self.logger.debug(f"Captured HTML dump: {html_file}")
+                if cleaning_stats['script_tags_removed'] > 0 or cleaning_stats['style_tags_removed'] > 0:
+                    self.logger.debug(
+                        f"Cleaned HTML: removed {cleaning_stats['script_tags_removed']} scripts, "
+                        f"{cleaning_stats['style_tags_removed']} styles, "
+                        f"{cleaning_stats['inline_styles_removed']} inline styles"
+                    )
             except Exception as e:
                 error_data["html_capture_error"] = str(e)
                 self.logger.warning(f"Failed to capture HTML: {e}")

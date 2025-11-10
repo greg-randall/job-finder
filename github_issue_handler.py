@@ -8,7 +8,6 @@ It aggregates error information and artifacts into a single issue per scraper.
 
 import json
 import subprocess
-import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -374,51 +373,49 @@ class GitHubIssueHandler:
             except Exception as e:
                 self.logger.warning(f"Could not load error JSON: {e}")
 
-        # Screenshot
-        if artifacts.get('screenshot'):
-            try:
-                screenshot_path = artifacts['screenshot']
-                file_size = screenshot_path.stat().st_size
-
-                # Only embed screenshot if it's reasonably sized (< 500KB)
-                # Base64 encoding increases size by ~33%, and GitHub has 65KB issue body limit
-                # But we can use img tags which don't count against the limit the same way
-                max_screenshot_size = 500 * 1024  # 500KB
-
-                if file_size <= max_screenshot_size:
-                    with open(screenshot_path, 'rb') as f:
-                        screenshot_data = f.read()
-                        screenshot_b64 = base64.b64encode(screenshot_data).decode('utf-8')
-
-                    body += f"### Screenshot\n\n"
-                    body += f"<details>\n"
-                    body += f"<summary>Click to view screenshot from <code>{screenshot_path.name}</code></summary>\n\n"
-                    body += f'<img src="data:image/png;base64,{screenshot_b64}" alt="Screenshot" />\n\n'
-                    body += f"</details>\n\n"
-                else:
-                    body += f"### Screenshot\n\n"
-                    body += f"⚠️ Screenshot is too large to embed ({file_size / 1024:.1f} KB)\n"
-                    body += f"File: `{screenshot_path.name}` (stored locally)\n\n"
-
-            except Exception as e:
-                self.logger.warning(f"Could not load screenshot file: {e}")
-                body += f"### Screenshot\n\n"
-                body += f"❌ Could not load screenshot file: {e}\n\n"
-
         # HTML Content
         if artifacts.get('html'):
             try:
                 with open(artifacts['html'], 'r', encoding='utf-8', errors='ignore') as f:
                     html_content = f.read()
 
+                # Try to load cleaning statistics from error JSON
+                cleaning_stats = None
+                if artifacts.get('json'):
+                    try:
+                        with open(artifacts['json'], 'r') as f:
+                            error_data = json.load(f)
+                            cleaning_stats = error_data.get('html_cleaning_stats')
+                    except Exception:
+                        pass
+
                 # Truncate if too large (GitHub has limits around 65KB for issue bodies)
-                max_html_length = 30000  # Reduced to leave room for screenshot
+                max_html_length = 30000  # Keep at 30K for cleaned body content
+                was_truncated = False
                 if len(html_content) > max_html_length:
                     html_content = html_content[:max_html_length] + "\n\n... (truncated)"
+                    was_truncated = True
 
                 body += f"### HTML Page Content\n\n"
                 body += f"<details>\n"
-                body += f"<summary>Click to expand HTML dump from <code>{artifacts['html'].name}</code></summary>\n\n"
+                body += f"<summary>Click to expand HTML body content from <code>{artifacts['html'].name}</code></summary>\n\n"
+
+                # Add cleaning statistics note if available
+                if cleaning_stats:
+                    body += f"**Cleaned HTML:** Showing `document.body` content with:\n"
+                    if cleaning_stats.get('script_tags_removed', 0) > 0:
+                        body += f"- Removed {cleaning_stats['script_tags_removed']} `<script>` tag(s) ({cleaning_stats['script_chars_removed']:,} characters of JavaScript)\n"
+                    if cleaning_stats.get('style_tags_removed', 0) > 0:
+                        body += f"- Removed {cleaning_stats['style_tags_removed']} `<style>` tag(s) ({cleaning_stats['style_chars_removed']:,} characters of CSS)\n"
+                    if cleaning_stats.get('inline_styles_removed', 0) > 0:
+                        body += f"- Removed {cleaning_stats['inline_styles_removed']} inline `style` attribute(s)\n"
+                    body += "\n"
+                else:
+                    body += f"**Note:** Showing cleaned `document.body` content (scripts and styles removed)\n\n"
+
+                if was_truncated:
+                    body += f"⚠️ **Content truncated at {max_html_length:,} characters**\n\n"
+
                 body += f"```html\n{html_content}\n```\n\n"
                 body += f"</details>\n\n"
             except Exception as e:
@@ -437,10 +434,7 @@ class GitHubIssueHandler:
 
         if artifacts.get('screenshot'):
             screenshot_size = artifacts['screenshot'].stat().st_size
-            if screenshot_size <= 500 * 1024:
-                body += f"- ✅ Screenshot: `{artifacts['screenshot'].name}` (embedded above, {screenshot_size / 1024:.1f} KB)\n"
-            else:
-                body += f"- ⚠️ Screenshot: `{artifacts['screenshot'].name}` (too large to embed, {screenshot_size / 1024:.1f} KB)\n"
+            body += f"- 📷 Screenshot: `{artifacts['screenshot'].name}` (saved locally, {screenshot_size / 1024:.1f} KB)\n"
         else:
             body += f"- ❌ Screenshot: Not available\n"
 
