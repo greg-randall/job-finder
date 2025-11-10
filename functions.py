@@ -539,11 +539,36 @@ async def wait_for_selector(
         # Timeout reached
         if logger:
             logger.warning(f"Timeout waiting for element: {selector} (waited {timeout_seconds}s)")
+            current_url = await tab.evaluate('window.location.href')
+            await logger.capture_error_context(
+                error_type="SelectorTimeout",
+                error_message=f"Timeout waiting for selector '{selector}'",
+                url=current_url,
+                page=tab,
+                context={
+                    "selector": selector,
+                    "timeout_seconds": timeout_seconds
+                },
+                failed_selector=selector
+            )
         return False
 
     except Exception as e:
         if logger:
+            current_url = await tab.evaluate('window.location.href')
             logger.error(f"Error waiting for selector '{selector}': {str(e)}")
+            await logger.capture_error_context(
+                error_type="SelectorError",
+                error_message=f"Error waiting for selector '{selector}': {str(e)}",
+                url=current_url,
+                page=tab,
+                stack_trace=traceback.format_exc(),
+                context={
+                    "selector": selector,
+                    "error": str(e)
+                },
+                failed_selector=selector
+            )
         else:
             print(f"Error waiting for selector '{selector}': {str(e)}")
         return False
@@ -795,7 +820,8 @@ async def _extract_job_links(
                     "selector": job_link_selector,
                     "page_url": current_url,
                     "selector_type": "job_links"
-                }
+                },
+                failed_selector=job_link_selector
             )
 
         return links
@@ -813,7 +839,8 @@ async def _extract_job_links(
                 context={
                     "selector": job_link_selector,
                     "error": str(e)
-                }
+                },
+                failed_selector=job_link_selector
             )
         raise
 
@@ -919,6 +946,7 @@ async def scrape_site(
 
         if logger:
             logger.info("Successfully loaded job board")
+            await logger.attach_console_listener(tab)
         else:
             print("✅ Successfully loaded job board")
 

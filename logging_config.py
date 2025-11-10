@@ -43,6 +43,10 @@ class ScraperLogger:
         # Operation breadcrumbs for context
         self.operation_history: List[str] = []
 
+        # Console message storage
+        self.console_messages: List[Dict[str, Any]] = []
+        self.max_console_messages = 100
+
         # Statistics tracking
         self.stats = {
             "start_time": self.start_time.isoformat(),
@@ -97,6 +101,42 @@ class ScraperLogger:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.operation_history.append(f"[{timestamp}] {operation}")
 
+    def add_console_message(self, msg_type: str, message: str, timestamp: str):
+        """Add a browser console message to the internal list."""
+        if len(self.console_messages) >= self.max_console_messages:
+            self.console_messages.pop(0)  # Remove the oldest message
+        
+        self.console_messages.append({
+            'type': msg_type,
+            'message': message,
+            'timestamp': timestamp
+        })
+
+    async def attach_console_listener(self, page: Any):
+        """Attach a listener to the browser's console events."""
+        try:
+            # Handler for standard console API calls (log, error, warn, etc.)
+            async def on_console_api(event):
+                msg_type = event['type']
+                message = ' '.join([str(arg.get('value', '')) for arg in event['args']])
+                timestamp = datetime.fromtimestamp(event['timestamp'] / 1000).isoformat()
+                self.add_console_message(msg_type, message, timestamp)
+
+            # Handler for uncaught exceptions in the page
+            async def on_exception_thrown(event):
+                exception_details = event['exceptionDetails']
+                message = exception_details['exception']['description']
+                timestamp = datetime.fromtimestamp(event['timestamp'] / 1000).isoformat()
+                self.add_console_message('exception', message, timestamp)
+
+            # Add listeners to the page
+            await page.add_listener('Runtime.consoleAPICalled', on_console_api)
+            await page.add_listener('Runtime.exceptionThrown', on_exception_thrown)
+            
+            self.info("Console listener attached successfully.")
+        except Exception as e:
+            self.warning(f"Failed to attach console listener: {e}")
+
     def debug(self, message: str, **kwargs):
         """Log debug message."""
         self.logger.debug(message, extra=kwargs)
@@ -124,6 +164,80 @@ class ScraperLogger:
         self.logger.critical(message, extra=kwargs)
         self.add_breadcrumb(f"CRITICAL: {message}")
         self.stats["errors"] += 1
+
+    @staticmethod
+    def _levenshtein_distance(s1: str, s2: str) -> int:
+        """Calculate Levenshtein distance between two strings."""
+        if len(s1) > len(s2):
+            s1, s2 = s2, s1
+
+        distances = range(len(s1) + 1)
+        for i2, c2 in enumerate(s2):
+            distances_ = [i2 + 1]
+            for i1, c1 in enumerate(s1):
+                if c1 == c2:
+                    distances_.append(distances[i1])
+                else:
+                    distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+            distances = distances_
+        return distances[-1]
+
+    async def analyze_failed_selector(self, page, selector: str) -> Dict[str, Any]:
+        """Run analysis in-browser to diagnose a failed selector."""
+        try:
+            # This script is executed in the browser's context
+            js_script = """
+            (selector) => {
+                const analysis = {};
+                try {
+                    analysis.full_selector_count = document.querySelectorAll(selector).length;
+                    
+                    const parts = selector.split(' ').map(p => p.trim()).filter(p => p);
+                    analysis.part_counts = {};
+                    for (const part of parts) {
+                        try {
+                            analysis.part_counts[part] = document.querySelectorAll(part).length;
+                        } catch (e) {
+                            analysis.part_counts[part] = 'Error: ' + e.message;
+                        }
+                    }
+
+                    const class_set = new Set();
+                    document.querySelectorAll('[class]').forEach(el => {
+                        el.classList.forEach(c => class_set.add(c));
+                    });
+                    analysis.all_class_names = Array.from(class_set);
+                    
+                    analysis.document_ready_state = document.readyState;
+                    analysis.total_element_count = document.getElementsByTagName('*').length;
+
+                } catch (e) {
+                    analysis.error = 'Error during analysis: ' + e.message;
+                }
+                return analysis;
+            }
+            """
+            analysis_result = await page.evaluate(js_script, selector)
+
+            # Find similar class names
+            if 'all_class_names' in analysis_result and analysis_result['all_class_names']:
+                # A simple heuristic to find a class in the selector
+                selector_class_match = re.search(r'\.([a-zA-Z0-9_-]+)', selector)
+                if selector_class_match:
+                    failed_class = selector_class_match.group(1)
+                    similar_classes = []
+                    for cls in analysis_result['all_class_names']:
+                        distance = self._levenshtein_distance(failed_class, cls)
+                        if distance < 3:  # Threshold for similarity
+                            similar_classes.append({'class': cls, 'distance': distance})
+                    
+                    # Sort by distance and take the top 5
+                    analysis_result['similar_classes'] = sorted(similar_classes, key=lambda x: x['distance'])[:5]
+
+            return analysis_result
+        except Exception as e:
+            self.warning(f"Could not run selector analysis: {e}")
+            return {"error": f"Failed to execute analysis script: {e}"}
 
     @staticmethod
     def clean_html_for_debugging(html_content: str) -> Tuple[str, Dict[str, int]]:
@@ -195,6 +309,7 @@ class ScraperLogger:
         page: Optional[Any] = None,  # nodriver Tab object
         stack_trace: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        failed_selector: Optional[str] = None,
     ) -> str:
         """
         Capture comprehensive error context for LLM analysis.
@@ -206,6 +321,7 @@ class ScraperLogger:
             page: nodriver Tab object (for HTML dump and screenshot)
             stack_trace: Full stack trace
             context: Additional context dictionary
+            failed_selector: The CSS selector that failed, if applicable.
 
         Returns:
             Path to the error context JSON file
@@ -255,6 +371,20 @@ class ScraperLogger:
                 self.logger.warning(f"Failed to capture HTML: {e}")
 
             try:
+                # Save full, raw HTML for deep debugging
+                full_raw_html = await page.evaluate('document.documentElement.outerHTML')
+                full_html_file = self.error_dir / f"{timestamp_str}_page_full.html"
+                with open(full_html_file, 'w', encoding='utf-8') as f:
+                    f.write(full_raw_html)
+                
+                error_data["html_full_file"] = str(full_html_file)
+                error_data["html_full_size_bytes"] = len(full_raw_html)
+                self.logger.debug(f"Saved full HTML dump: {full_html_file}")
+            except Exception as e:
+                error_data["full_html_capture_error"] = str(e)
+                self.logger.warning(f"Failed to capture full HTML: {e}")
+
+            try:
                 # Capture screenshot (nodriver uses save_screenshot)
                 screenshot_file = self.error_dir / f"{timestamp_str}_screenshot.png"
                 await page.save_screenshot(str(screenshot_file))
@@ -263,6 +393,14 @@ class ScraperLogger:
             except Exception as e:
                 error_data["screenshot_error"] = str(e)
                 self.logger.warning(f"Failed to capture screenshot: {e}")
+
+        # Run selector analysis if a failed selector is provided
+        if failed_selector and page:
+            analysis_data = await self.analyze_failed_selector(page, failed_selector)
+            error_data["selector_analysis"] = analysis_data
+
+        # Add console messages to the error data
+        error_data["console_messages"] = self.console_messages.copy()
 
         # Write structured error JSON
         error_json_file = self.error_dir / f"{timestamp_str}_{error_type.lower()}.json"

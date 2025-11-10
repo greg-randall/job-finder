@@ -288,6 +288,11 @@ class GitHubIssueHandler:
                         if screenshot_file.exists():
                             artifacts['screenshot'] = screenshot_file
 
+                        # Look for corresponding full HTML file
+                        full_html_file = self.error_dir / f"{timestamp_prefix}_page_full.html"
+                        if full_html_file.exists():
+                            artifacts['html_full'] = full_html_file
+
                     # Found matching scraper, stop searching
                     break
 
@@ -370,58 +375,130 @@ class GitHubIssueHandler:
                     body += f"### Stack Trace\n\n"
                     body += f"```\n{error_data.get('stack_trace')}\n```\n\n"
 
+                # Selector Analysis
+                if error_data.get('selector_analysis'):
+                    selector_analysis = error_data['selector_analysis']
+                    body += f"### Selector Analysis\n\n"
+                    body += f"**Full Selector Count:** `{selector_analysis.get('full_selector_count', 'N/A')}`\n"
+                    
+                    if selector_analysis.get('part_counts'):
+                        body += "**Part Counts:**\n"
+                        body += "```json\n"
+                        body += json.dumps(selector_analysis['part_counts'], indent=2)
+                        body += "\n```\n"
+                    
+                    if selector_analysis.get('all_class_names'):
+                        body += f"**Total Unique Classes on Page:** {len(selector_analysis['all_class_names'])}\n"
+                    
+                    if selector_analysis.get('similar_classes'):
+                        body += "**Similar Classes (Levenshtein Distance < 3):**\n"
+                        for sc in selector_analysis['similar_classes']:
+                            body += f"- `{sc['class']}` (Distance: {sc['distance']})\n"
+                        body += "\n"
+                    
+                    body += f"**Document Ready State:** `{selector_analysis.get('document_ready_state', 'N/A')}`\n"
+                    body += f"**Total Element Count:** `{selector_analysis.get('total_element_count', 'N/A')}`\n\n"
+                    
+                    if selector_analysis.get('error'):
+                        body += f"**Analysis Error:** `{selector_analysis['error']}`\n\n"
+
+                # Browser Console Messages
+                if error_data.get('console_messages'):
+                    console_messages = error_data['console_messages']
+                    if console_messages:
+                        error_count = sum(1 for msg in console_messages if msg.get('type') == 'error')
+                        warn_count = sum(1 for msg in console_messages if msg.get('type') == 'warning')
+
+                        body += f"### Browser Console Messages ({error_count} errors, {warn_count} warnings)\n\n"
+                        body += f"<details>\n"
+                        body += f"<summary>Click to expand {len(console_messages)} console messages</summary>\n\n"
+                        body += "```\n"
+                        for msg in console_messages:
+                            body += f"[{msg.get('timestamp', 'N/A')}] [{msg.get('type', 'log').upper()}]: {msg.get('message', 'N/A')}\n"
+                        body += "```\n\n"
+                        body += f"</details>\n\n"
+
             except Exception as e:
                 self.logger.warning(f"Could not load error JSON: {e}")
 
         # HTML Content
-        if artifacts.get('html'):
-            try:
-                with open(artifacts['html'], 'r', encoding='utf-8', errors='ignore') as f:
-                    html_content = f.read()
+        if artifacts.get('html') or artifacts.get('html_full'):
+            body += f"### HTML Page Content\n\n"
+            body += f"Two HTML files are saved for debugging: a cleaned version (document.body) and the full raw HTML (document.documentElement.outerHTML).\n\n"
 
-                # Try to load cleaning statistics from error JSON
-                cleaning_stats = None
-                if artifacts.get('json'):
-                    try:
-                        with open(artifacts['json'], 'r') as f:
-                            error_data = json.load(f)
-                            cleaning_stats = error_data.get('html_cleaning_stats')
-                    except Exception:
-                        pass
+            # Cleaned HTML
+            if artifacts.get('html'):
+                try:
+                    with open(artifacts['html'], 'r', encoding='utf-8', errors='ignore') as f:
+                        html_content = f.read()
 
-                # Truncate if too large (GitHub has limits around 65KB for issue bodies)
-                max_html_length = 30000  # Keep at 30K for cleaned body content
-                was_truncated = False
-                if len(html_content) > max_html_length:
-                    html_content = html_content[:max_html_length] + "\n\n... (truncated)"
-                    was_truncated = True
+                    # Try to load cleaning statistics from error JSON
+                    cleaning_stats = None
+                    if artifacts.get('json'):
+                        try:
+                            with open(artifacts['json'], 'r') as f:
+                                error_data = json.load(f)
+                                cleaning_stats = error_data.get('html_cleaning_stats')
+                        except Exception:
+                            pass
 
-                body += f"### HTML Page Content\n\n"
-                body += f"<details>\n"
-                body += f"<summary>Click to expand HTML body content from <code>{artifacts['html'].name}</code></summary>\n\n"
+                    # Truncate if too large (GitHub has limits around 65KB for issue bodies)
+                    max_html_length = 30000  # Keep at 30K for cleaned body content
+                    was_truncated = False
+                    if len(html_content) > max_html_length:
+                        html_content = html_content[:max_html_length] + "\n\n... (truncated)"
+                        was_truncated = True
 
-                # Add cleaning statistics note if available
-                if cleaning_stats:
-                    body += f"**Cleaned HTML:** Showing `document.body` content with:\n"
-                    if cleaning_stats.get('script_tags_removed', 0) > 0:
-                        body += f"- Removed {cleaning_stats['script_tags_removed']} `<script>` tag(s) ({cleaning_stats['script_chars_removed']:,} characters of JavaScript)\n"
-                    if cleaning_stats.get('style_tags_removed', 0) > 0:
-                        body += f"- Removed {cleaning_stats['style_tags_removed']} `<style>` tag(s) ({cleaning_stats['style_chars_removed']:,} characters of CSS)\n"
-                    if cleaning_stats.get('inline_styles_removed', 0) > 0:
-                        body += f"- Removed {cleaning_stats['inline_styles_removed']} inline `style` attribute(s)\n"
-                    body += "\n"
-                else:
-                    body += f"**Note:** Showing cleaned `document.body` content (scripts and styles removed)\n\n"
+                    body += f"<details>\n"
+                    body += f"<summary>Click to expand CLEANED HTML body content from <code>{artifacts['html'].name}</code></summary>\n\n"
 
-                if was_truncated:
-                    body += f"⚠️ **Content truncated at {max_html_length:,} characters**\n\n"
+                    # Add cleaning statistics note if available
+                    if cleaning_stats:
+                        body += f"**Cleaned HTML:** Showing `document.body` content with:\n"
+                        if cleaning_stats.get('script_tags_removed', 0) > 0:
+                            body += f"- Removed {cleaning_stats['script_tags_removed']} `<script>` tag(s) ({cleaning_stats['script_chars_removed']:,} characters of JavaScript)\n"
+                        if cleaning_stats.get('style_tags_removed', 0) > 0:
+                            body += f"- Removed {cleaning_stats['style_tags_removed']} `<style>` tag(s) ({cleaning_stats['style_chars_removed']:,} characters of CSS)\n"
+                        if cleaning_stats.get('inline_styles_removed', 0) > 0:
+                            body += f"- Removed {cleaning_stats['inline_styles_removed']} inline `style` attribute(s)\n"
+                        body += "\n"
+                    else:
+                        body += f"**Note:** Showing cleaned `document.body` content (scripts and styles removed)\n\n"
 
-                body += f"```html\n{html_content}\n```\n\n"
-                body += f"</details>\n\n"
-            except Exception as e:
-                self.logger.warning(f"Could not load HTML file: {e}")
-                body += f"### HTML Page Content\n\n"
-                body += f"❌ Could not load HTML file: {e}\n\n"
+                    if was_truncated:
+                        body += f"⚠️ **Content truncated at {max_html_length:,} characters**\n\n"
+
+                    body += f"```html\n{html_content}\n```\n\n"
+                    body += f"</details>\n\n"
+                except Exception as e:
+                    self.logger.warning(f"Could not load cleaned HTML file: {e}")
+                    body += f"❌ Could not load cleaned HTML file: {e}\n\n"
+            
+            # Full HTML
+            if artifacts.get('html_full'):
+                try:
+                    with open(artifacts['html_full'], 'r', encoding='utf-8', errors='ignore') as f:
+                        full_html_content = f.read()
+                    
+                    max_full_html_length = 60000 # GitHub limit is around 65KB, keep it under
+                    full_html_truncated = False
+                    if len(full_html_content) > max_full_html_length:
+                        full_html_content = full_html_content[:max_full_html_length] + "\n\n... (truncated)"
+                        full_html_truncated = True
+
+                    body += f"<details>\n"
+                    body += f"<summary>Click to expand FULL RAW HTML content from <code>{artifacts['html_full'].name}</code></summary>\n\n"
+                    body += f"**Note:** Showing full `document.documentElement.outerHTML` content.\n\n"
+                    if full_html_truncated:
+                        body += f"⚠️ **Content truncated at {max_full_html_length:,} characters**\n\n"
+                    body += f"```html\n{full_html_content}\n```\n\n"
+                    body += f"</details>\n\n"
+                except Exception as e:
+                    self.logger.warning(f"Could not load full HTML file: {e}")
+                    body += f"❌ Could not load full HTML file: {e}\n\n"
+        else:
+            body += f"### HTML Page Content\n\n"
+            body += f"❌ No HTML content available.\n\n"
 
         # Attachments note
         body += f"### Debug Artifacts Summary\n\n"
@@ -432,6 +509,18 @@ class GitHubIssueHandler:
         else:
             body += f"- ❌ Error context JSON: Not available\n"
 
+        if error_data.get('selector_analysis'):
+            body += f"- ✅ Selector analysis: Results included above\n"
+        else:
+            body += f"- ❌ Selector analysis: Not available\n"
+
+        if error_data.get('console_messages'):
+            error_count = sum(1 for msg in error_data['console_messages'] if msg.get('type') == 'error')
+            warn_count = sum(1 for msg in error_data['console_messages'] if msg.get('type') == 'warning')
+            body += f"- ✅ Console messages: {error_count} errors, {warn_count} warnings captured above\n"
+        else:
+            body += f"- ❌ Console messages: Not available\n"
+
         if artifacts.get('screenshot'):
             screenshot_size = artifacts['screenshot'].stat().st_size
             body += f"- 📷 Screenshot: `{artifacts['screenshot'].name}` (saved locally, {screenshot_size / 1024:.1f} KB)\n"
@@ -439,9 +528,15 @@ class GitHubIssueHandler:
             body += f"- ❌ Screenshot: Not available\n"
 
         if artifacts.get('html'):
-            body += f"- ✅ HTML dump: `{artifacts['html'].name}` (included above)\n"
+            body += f"- ✅ Cleaned HTML dump: `{artifacts['html'].name}` (included above)\n"
         else:
-            body += f"- ❌ HTML dump: Not available\n"
+            body += f"- ❌ Cleaned HTML dump: Not available\n"
+        
+        if artifacts.get('html_full'):
+            full_html_size = artifacts['html_full'].stat().st_size
+            body += f"- 📄 Full HTML dump: `{artifacts['html_full'].name}` (saved locally, {full_html_size / 1024:.1f} KB)\n"
+        else:
+            body += f"- ❌ Full HTML dump: Not available\n"
 
         body += "\n---\n"
         body += "*This issue was automatically generated by the scraper failure handler.*\n"
