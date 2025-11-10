@@ -66,6 +66,11 @@ class CustomNavigationScraper(BaseScraper):
                 return Array.from(elements).map(el => el.href);
             }}''')
 
+            # Handle case where evaluate returns None
+            if job_links is None:
+                self.logger.warning(f"Job link extraction returned None for selector: {job_link_selector}")
+                return []
+
             # Add to set for deduplication
             self.all_job_links.update(job_links)
 
@@ -100,8 +105,18 @@ class CustomNavigationScraper(BaseScraper):
             self.logger.info("No more next button found")
             return False
 
+        # Check if next_button has get_attribute method (valid element)
+        if not hasattr(next_button, 'get_attribute') or not callable(getattr(next_button, 'get_attribute', None)):
+            self.logger.warning(f"Next button element does not have get_attribute method: {type(next_button)}")
+            return False
+
         # Get next page URL
-        next_url = await next_button.get_attribute('href')
+        try:
+            next_url = await next_button.get_attribute('href')
+        except Exception as e:
+            self.logger.error(f"Error getting href attribute from next button: {e}")
+            return False
+
         if not next_url:
             self.logger.info("Could not get next page URL")
             return False
