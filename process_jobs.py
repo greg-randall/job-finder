@@ -1148,13 +1148,16 @@ if __name__ == "__main__":
     parser.add_argument('--interest-weight', type=float, default=rating_config.get('weights', {}).get('interest', 0.15), help='Weight for interest match (0-1)')
     parser.add_argument('--all-locations', action='store_false', dest='richmond_or_remote_only',
                     help='Include all locations, not just remote or near Richmond')
-    parser.add_argument('--report-scraping-failures', action='store_true',
-                    help='Create/update GitHub issues for jobs with insufficient content')
+    parser.add_argument('--disable-reporting-scraping-failures', action='store_false', dest='report_scraping_failures',
+                    help='Disable automatic GitHub issue creation for jobs with insufficient content')
     parser.add_argument('--dry-run-github', action='store_true',
                     help='Preview what GitHub issues would be created without actually creating them')
     parser.add_argument('--min-content-length', type=int, default=200,
                     help='Minimum content length threshold for jobs (default: 200 characters)')
-    parser.set_defaults(richmond_or_remote_only=processing_config.get('richmond_or_remote_only', True))
+    parser.set_defaults(
+        richmond_or_remote_only=processing_config.get('richmond_or_remote_only', True),
+        report_scraping_failures=True  # Default to enabled
+    )
     args = parser.parse_args()
     
     # Create weights dictionary from command line arguments
