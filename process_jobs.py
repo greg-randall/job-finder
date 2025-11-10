@@ -478,52 +478,93 @@ def process_jobs(resume_path, cover_letter_path=None, max_jobs=None, debug=False
     
     # Get already processed URLs
     completed_urls = get_completed_urls() if not force_reprocess else set()
-    print(f"Found {len(completed_urls)} already processed URLs")
-    
+    print(f"Found {len(completed_urls)} URLs in completed_urls.txt (tracking processed jobs)")
+
     # Get all cached job files
     cache_dir = Path("cache")
     if not cache_dir.exists():
         print(f"Error: Cache directory '{cache_dir}' does not exist")
         return
-    
+
     job_files = list(cache_dir.glob("*.txt"))
     print(f"Found {len(job_files)} cached job files")
-    
+
     # Path for the output CSV
     csv_path = Path("processed_jobs.csv")
-    
-    # Get all job files and their content
+
+    # Get all job files and their content, tracking skip reasons
     jobs_to_process = []
+    skip_reasons = {
+        'already_processed': 0,
+        'url_filtered': 0,
+        'insufficient_content': 0,
+        'no_content': 0
+    }
+    insufficient_samples = []
+
     for job_file in job_files:
         job_content = load_document(job_file)
         if not job_content:
+            skip_reasons['no_content'] += 1
             continue
-        
+
         # Extract job URL from the first line of the content
         job_url = job_content.strip().split('\n')[0] if job_content else "Unknown"
-        
+
         # Strip quotes from URL if present
         job_url = job_url.strip('"\'')
-        
+
         # Skip if already processed and not forcing reprocessing
         if not force_reprocess and job_url in completed_urls:
+            skip_reasons['already_processed'] += 1
             if debug:
                 print(f"Skipping already processed job URL: {job_url}")
             continue
-        
+
         # Skip jobs that match filtering rules
         if should_skip_job_url(job_url):
+            skip_reasons['url_filtered'] += 1
             if debug:
                 print(f"Skipping job with filtered URL: {job_url}")
             continue
-    
+
         # Skip jobs with insufficient content
         if not has_sufficient_content(job_content, min_length=200):
+            skip_reasons['insufficient_content'] += 1
             if debug:
                 print(f"Skipping job with insufficient content: {job_url}")
+            # Collect samples for display
+            if len(insufficient_samples) < 5:
+                content_lines = job_content.strip().split('\n')
+                actual_content = '\n'.join(content_lines[1:]) if len(content_lines) > 1 else ''
+                insufficient_samples.append((job_file.name, job_url, len(actual_content)))
             continue
-            
+
         jobs_to_process.append((job_file, job_content, job_url))
+
+    # Show filtering breakdown
+    print(f"\nFiltering breakdown:")
+    print(f"  Total cache files: {len(job_files)}")
+    print(f"  Already processed: {skip_reasons['already_processed']}")
+    print(f"  URL filtering rules: {skip_reasons['url_filtered']}")
+    print(f"  Insufficient content (<200 chars): {skip_reasons['insufficient_content']}")
+    if skip_reasons['no_content'] > 0:
+        print(f"  Empty/unreadable files: {skip_reasons['no_content']}")
+    print(f"  = Ready to process: {len(jobs_to_process)}\n")
+
+    # Show samples of insufficient content files if any exist
+    if insufficient_samples and (debug or len(jobs_to_process) == 0):
+        print("Sample jobs skipped due to insufficient content:")
+        for name, url, length in insufficient_samples:
+            print(f"  File: {name[:50]}{'...' if len(name) > 50 else ''}")
+            print(f"  URL:  {url[:70]}{'...' if len(url) > 70 else ''}")
+            print(f"  Content: {length} chars (need 200+)")
+            print()
+
+        if len(jobs_to_process) == 0 and skip_reasons['insufficient_content'] > 0:
+            print(f"Note: {skip_reasons['insufficient_content']} jobs have insufficient content.")
+            print("These may be failed scrapes or pages with minimal text.")
+            print("Check the cache files to see if they need to be re-scraped.\n")
     
     # For debug mode, randomly select jobs and show samples
     if debug:
