@@ -61,13 +61,38 @@ class CustomNavigationScraper(BaseScraper):
             return []
 
         try:
-            job_links = await self.tab.evaluate(f'''() => {{
-                const elements = document.querySelectorAll('{job_link_selector}');
-                return Array.from(elements).map(el => el.href);
-            }}''')
+            # Use nodriver's select_all method instead of evaluate
+            elements = await self.tab.select_all(job_link_selector)
+
+            if not elements:
+                self.logger.warning(f"No job links found with selector: {job_link_selector}")
+                return []
+
+            # Get the base URL
+            base_url = await self.tab.evaluate('window.location.origin')
+
+            # Extract href from each element
+            job_links = []
+            for i, element in enumerate(elements):
+                try:
+                    # Get href using direct property access
+                    href = element.href
+                    if href:
+                        # Convert to absolute URL if needed
+                        if href.startswith('http'):
+                            job_links.append(href)
+                        else:
+                            if href.startswith('/'):
+                                job_links.append(f"{base_url}{href}")
+                            else:
+                                job_links.append(f"{base_url}/{href}")
+                except Exception as e:
+                    self.logger.debug(f"Error getting href from element {i}: {str(e)}")
+                    continue
 
             # Add to set for deduplication
-            self.all_job_links.update(job_links)
+            if job_links:
+                self.all_job_links.update(job_links)
 
             self.logger.debug(f"Extracted {len(job_links)} job links (total unique: {len(self.all_job_links)})")
             return job_links
@@ -100,26 +125,32 @@ class CustomNavigationScraper(BaseScraper):
             self.logger.info("No more next button found")
             return False
 
-        # Get next page URL
-        next_url = await next_button.get_attribute('href')
-        if not next_url:
-            self.logger.info("Could not get next page URL")
+        try:
+            # Get next page URL using direct property access
+            # (same approach as standard_scraper.py for link elements)
+            next_url = next_button.href
+            if not next_url:
+                self.logger.info("Could not get next page URL")
+                return False
+
+            # Construct full URL if needed
+            if self.base_url and not next_url.startswith('http'):
+                next_url = self.base_url + next_url
+
+            self.logger.debug(f"Navigating to next page: {next_url}")
+
+            # Navigate to next page
+            success = await navigate_with_retries(self.tab, next_url, logger=self.logger)
+            if not success:
+                self.logger.error("Failed to load next page")
+                return False
+
+            await wait_for_load(self.tab)
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error navigating to next page: {str(e)}")
             return False
-
-        # Construct full URL if needed
-        if self.base_url and not next_url.startswith('http'):
-            next_url = self.base_url + next_url
-
-        self.logger.debug(f"Navigating to next page: {next_url}")
-
-        # Navigate to next page
-        success = await navigate_with_retries(self.tab, next_url, logger=self.logger)
-        if not success:
-            self.logger.error("Failed to load next page")
-            return False
-
-        await wait_for_load(self.tab)
-        return True
 
     async def scrape_all_pages(self) -> List[str]:
         """
