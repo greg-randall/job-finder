@@ -29,7 +29,7 @@ async def run_site(site_config: dict, logger) -> dict:
 
     Args:
         site_config: Site configuration dictionary
-        logger: Logger instance
+        logger: Logger instance (group logger for coordination)
 
     Returns:
         Result dictionary with success status and stats
@@ -41,9 +41,12 @@ async def run_site(site_config: dict, logger) -> dict:
     logger.info(f"URL: {site_url}")
     logger.add_breadcrumb(f"Started {site_name}")
 
+    # Create site-specific logger for proper error artifact tagging
+    site_logger = get_logger(site_name)
+
     try:
-        # Create appropriate scraper
-        scraper = create_scraper(site_config, logger=logger)
+        # Create appropriate scraper with site-specific logger
+        scraper = create_scraper(site_config, logger=site_logger)
 
         # Run the scraper
         result = await scraper.scrape()
@@ -54,7 +57,7 @@ async def run_site(site_config: dict, logger) -> dict:
             logger.increment_stat("sites_failed")
 
             # Report failure to GitHub
-            logger.info(f"Reporting scraper failure to GitHub for: {site_name}")
+            site_logger.info(f"Reporting scraper failure to GitHub for: {site_name}")
             error_summary = result.get('reason', 'Unknown error occurred')
             stats = result.get('stats', {})
 
@@ -64,19 +67,19 @@ async def run_site(site_config: dict, logger) -> dict:
                     scraper_url=site_url,
                     error_summary=error_summary,
                     stats=stats,
-                    logger=logger
+                    logger=site_logger.logger  # Pass the underlying logging.Logger instance
                 )
                 if success:
-                    logger.info(f"✓ GitHub issue created/updated for {site_name}")
+                    site_logger.info(f"✓ GitHub issue created/updated for {site_name}")
                 else:
-                    logger.warning(f"Failed to create/update GitHub issue for {site_name}")
+                    site_logger.warning(f"Failed to create/update GitHub issue for {site_name}")
             except Exception as gh_error:
-                logger.warning(f"Error reporting to GitHub: {gh_error}")
+                site_logger.warning(f"Error reporting to GitHub: {gh_error}")
 
         return result
 
     except Exception as e:
-        logger.error(f"Failed to scrape {site_name}: {str(e)}")
+        site_logger.error(f"Failed to scrape {site_name}: {str(e)}")
         logger.increment_stat("sites_failed")
 
         # Report failure to GitHub
@@ -87,14 +90,14 @@ async def run_site(site_config: dict, logger) -> dict:
                 scraper_url=site_url,
                 error_summary=error_summary,
                 stats={},
-                logger=logger
+                logger=site_logger.logger  # Pass the underlying logging.Logger instance
             )
             if success:
-                logger.info(f"✓ GitHub issue created/updated for {site_name}")
+                site_logger.info(f"✓ GitHub issue created/updated for {site_name}")
             else:
-                logger.warning(f"Failed to create/update GitHub issue for {site_name}")
+                site_logger.warning(f"Failed to create/update GitHub issue for {site_name}")
         except Exception as gh_error:
-            logger.warning(f"Error reporting to GitHub: {gh_error}")
+            site_logger.warning(f"Error reporting to GitHub: {gh_error}")
 
         return {
             'success': False,

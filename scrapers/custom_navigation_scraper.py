@@ -43,8 +43,8 @@ class CustomNavigationScraper(BaseScraper):
             cookie_modal_class = self.selectors.get('cookie_modal_class')
             if cookie_modal_class:
                 self.logger.debug(f"Handling cookie consent for modal: {cookie_modal_class}")
-                await handle_cookie_consent(self.page, cookie_modal_class)
-                await self.tab.wait_for_timeout(1000)
+                await handle_cookie_consent(self.tab, cookie_modal_class)
+                await self.tab.sleep(1)  # Wait 1 second after handling cookies
 
         return True
 
@@ -113,12 +113,12 @@ class CustomNavigationScraper(BaseScraper):
         self.logger.debug(f"Navigating to next page: {next_url}")
 
         # Navigate to next page
-        success = await navigate_with_retries(self.page, next_url, logger=self.logger)
+        success = await navigate_with_retries(self.tab, next_url, logger=self.logger)
         if not success:
             self.logger.error("Failed to load next page")
             return False
 
-        await wait_for_load(self.page)
+        await wait_for_load(self.tab)
         return True
 
     async def scrape_all_pages(self) -> List[str]:
