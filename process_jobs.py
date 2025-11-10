@@ -451,7 +451,65 @@ def has_sufficient_content(job_content, min_length=200):
     # Check if the content is too short
     return len(actual_content) >= min_length
 
-def process_jobs(resume_path, cover_letter_path=None, max_jobs=None, debug=False, force_reprocess=False, parallel=8, weights=None):
+def collect_all_insufficient_jobs(cache_dir, min_length=200):
+    """
+    Scan all cache files and identify those with insufficient content.
+
+    Args:
+        cache_dir: Path to cache directory
+        min_length: Minimum content length threshold (default: 200)
+
+    Returns:
+        dict[scraper_name -> list[job_info]]
+        where job_info = {
+            'filename': str,
+            'url': str,
+            'content_length': int,
+            'sample_content': str (first 200 chars)
+        }
+    """
+    insufficient_by_scraper = {}
+
+    for job_file in cache_dir.glob("*.txt"):
+        content = load_document(job_file)
+        if not content:
+            continue
+
+        # Extract URL and actual content
+        lines = content.strip().split('\n')
+        url = lines[0].strip('"\'')
+        actual_content = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+
+        if len(actual_content) < min_length:
+            # Extract scraper name from filename (before first underscore)
+            scraper_name = job_file.stem.split('_')[0]
+
+            if scraper_name not in insufficient_by_scraper:
+                insufficient_by_scraper[scraper_name] = []
+
+            insufficient_by_scraper[scraper_name].append({
+                'filename': job_file.name,
+                'url': url,
+                'content_length': len(actual_content),
+                'sample_content': actual_content[:200]  # First 200 chars for sample
+            })
+
+    return insufficient_by_scraper
+
+def count_total_jobs_for_scraper(scraper_name, cache_dir):
+    """
+    Count total cache files for a given scraper.
+
+    Args:
+        scraper_name: Name of the scraper
+        cache_dir: Path to cache directory
+
+    Returns:
+        int: Count of cache files for this scraper
+    """
+    return len(list(cache_dir.glob(f"{scraper_name}_*.txt")))
+
+def process_jobs(resume_path, cover_letter_path=None, max_jobs=None, debug=False, force_reprocess=False, parallel=8, weights=None, report_scraping_failures=False, dry_run_github=False, min_content_length=200):
     """
     Process jobs from the cache folder, compare them to the resume and optionally a cover letter,
     and rate how well they match with detailed category scores.
@@ -529,7 +587,7 @@ def process_jobs(resume_path, cover_letter_path=None, max_jobs=None, debug=False
             continue
 
         # Skip jobs with insufficient content
-        if not has_sufficient_content(job_content, min_length=200):
+        if not has_sufficient_content(job_content, min_length=min_content_length):
             skip_reasons['insufficient_content'] += 1
             if debug:
                 print(f"Skipping job with insufficient content: {job_url}")
@@ -547,7 +605,7 @@ def process_jobs(resume_path, cover_letter_path=None, max_jobs=None, debug=False
     print(f"  Total cache files: {len(job_files)}")
     print(f"  Already processed: {skip_reasons['already_processed']}")
     print(f"  URL filtering rules: {skip_reasons['url_filtered']}")
-    print(f"  Insufficient content (<200 chars): {skip_reasons['insufficient_content']}")
+    print(f"  Insufficient content (<{min_content_length} chars): {skip_reasons['insufficient_content']}")
     if skip_reasons['no_content'] > 0:
         print(f"  Empty/unreadable files: {skip_reasons['no_content']}")
     print(f"  = Ready to process: {len(jobs_to_process)}\n")
@@ -558,13 +616,59 @@ def process_jobs(resume_path, cover_letter_path=None, max_jobs=None, debug=False
         for name, url, length in insufficient_samples:
             print(f"  File: {name[:50]}{'...' if len(name) > 50 else ''}")
             print(f"  URL:  {url[:70]}{'...' if len(url) > 70 else ''}")
-            print(f"  Content: {length} chars (need 200+)")
+            print(f"  Content: {length} chars (need {min_content_length}+)")
             print()
 
         if len(jobs_to_process) == 0 and skip_reasons['insufficient_content'] > 0:
             print(f"Note: {skip_reasons['insufficient_content']} jobs have insufficient content.")
             print("These may be failed scrapes or pages with minimal text.")
             print("Check the cache files to see if they need to be re-scraped.\n")
+
+    # Report insufficient content to GitHub if requested
+    if report_scraping_failures and skip_reasons['insufficient_content'] > 0:
+        print(f"{'[DRY RUN] ' if dry_run_github else ''}Reporting insufficient content to GitHub...\n")
+
+        # Collect all insufficient jobs grouped by scraper
+        insufficient_by_scraper = collect_all_insufficient_jobs(cache_dir, min_length=min_content_length)
+
+        if not dry_run_github:
+            # Actually create GitHub issues
+            from github_issue_handler import GitHubIssueHandler
+            import logging
+
+            # Create a simple logger for the GitHub handler
+            logging.basicConfig(level=logging.INFO)
+            gh_logger = logging.getLogger('github_reporter')
+
+            handler = GitHubIssueHandler(gh_logger)
+
+            for scraper_name, jobs in insufficient_by_scraper.items():
+                total_jobs = count_total_jobs_for_scraper(scraper_name, cache_dir)
+                print(f"  Processing {scraper_name}: {len(jobs)} insufficient jobs out of {total_jobs} total")
+
+                success = handler.handle_insufficient_content(
+                    scraper_name=scraper_name,
+                    jobs=jobs,
+                    total_scraper_jobs=total_jobs
+                )
+
+                if success:
+                    print(f"    ✓ GitHub issue created/updated for {scraper_name}")
+                else:
+                    print(f"    ✗ Failed to create/update issue for {scraper_name}")
+        else:
+            # Dry run: just show what would be reported
+            for scraper_name, jobs in insufficient_by_scraper.items():
+                total_jobs = count_total_jobs_for_scraper(scraper_name, cache_dir)
+                percentage = (len(jobs) / total_jobs * 100) if total_jobs > 0 else 0
+                print(f"  Would report {scraper_name}:")
+                print(f"    {len(jobs)} insufficient jobs out of {total_jobs} total ({percentage:.1f}%)")
+                print(f"    Sample URLs:")
+                for job in jobs[:3]:
+                    print(f"      - {job['url'][:70]}{'...' if len(job['url']) > 70 else ''}")
+                print()
+
+        print()
     
     # For debug mode, randomly select jobs and show samples
     if debug:
@@ -1044,6 +1148,12 @@ if __name__ == "__main__":
     parser.add_argument('--interest-weight', type=float, default=rating_config.get('weights', {}).get('interest', 0.15), help='Weight for interest match (0-1)')
     parser.add_argument('--all-locations', action='store_false', dest='richmond_or_remote_only',
                     help='Include all locations, not just remote or near Richmond')
+    parser.add_argument('--report-scraping-failures', action='store_true',
+                    help='Create/update GitHub issues for jobs with insufficient content')
+    parser.add_argument('--dry-run-github', action='store_true',
+                    help='Preview what GitHub issues would be created without actually creating them')
+    parser.add_argument('--min-content-length', type=int, default=200,
+                    help='Minimum content length threshold for jobs (default: 200 characters)')
     parser.set_defaults(richmond_or_remote_only=processing_config.get('richmond_or_remote_only', True))
     args = parser.parse_args()
     
@@ -1068,7 +1178,18 @@ if __name__ == "__main__":
         exit(0)
         
     # Process jobs and get results
-    results = process_jobs(args.resume, args.cover_letter, args.max_jobs, args.debug, args.force, args.parallel, weights)
+    results = process_jobs(
+        args.resume,
+        args.cover_letter,
+        args.max_jobs,
+        args.debug,
+        args.force,
+        args.parallel,
+        weights,
+        args.report_scraping_failures,
+        args.dry_run_github,
+        args.min_content_length
+    )
     
     # Create ranked job lists from all processed jobs
     all_jobs_df, all_high_quality_df = create_ranked_job_lists(

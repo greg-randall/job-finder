@@ -151,6 +151,10 @@ class GitHubIssueHandler:
             'auto-generated': {
                 'color': '808080',  # Gray
                 'description': 'Automatically generated issue'
+            },
+            'insufficient-content': {
+                'color': 'fbca04',  # Yellow/orange warning
+                'description': 'Jobs with insufficient content, likely scraping failures'
             }
         }
 
@@ -724,6 +728,222 @@ class GitHubIssueHandler:
 
         except Exception as e:
             self.logger.error(f"Error handling scraper failure: {e}")
+            return False
+
+    def find_existing_insufficient_content_issue(self, scraper_name: str) -> Optional[int]:
+        """
+        Check if an open insufficient-content issue exists for this scraper.
+
+        Args:
+            scraper_name: Name of the scraper
+
+        Returns:
+            Issue number if found and < 7 days old, None otherwise
+        """
+        self.logger.debug(f"Checking for existing insufficient-content issue for scraper: {scraper_name}")
+
+        # Build search command
+        cmd = [
+            "issue", "list",
+            "--state", "open",
+            "--json", "number,title,createdAt",
+            "--limit", "100"
+        ]
+
+        # Check if labels exist before filtering by them
+        scraper_label = f"scraper:{scraper_name}"
+        if self._label_exists(scraper_label):
+            cmd.extend(["--label", scraper_label])
+
+        if self._label_exists("insufficient-content"):
+            cmd.extend(["--label", "insufficient-content"])
+
+        # Search for open issues
+        success, output = self._run_gh_command(cmd)
+
+        if not success:
+            self.logger.warning(f"Could not search for existing issues: {output}")
+            return None
+
+        try:
+            issues = json.loads(output)
+            # Look for issues matching the scraper name in the title
+            for issue in issues:
+                if scraper_name in issue.get('title', ''):
+                    issue_number = issue['number']
+                    # Check if issue is < 7 days old
+                    created_at = datetime.fromisoformat(issue['createdAt'].replace('Z', '+00:00'))
+                    age_days = (datetime.now(created_at.tzinfo) - created_at).days
+
+                    if age_days < 7:
+                        self.logger.info(f"Found existing insufficient-content issue #{issue_number} for {scraper_name} ({age_days} days old)")
+                        return issue_number
+                    else:
+                        self.logger.info(f"Found old insufficient-content issue #{issue_number} for {scraper_name} ({age_days} days old), will create new")
+                        return None
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse issue list: {e}")
+
+        return None
+
+    def format_insufficient_content_body(
+        self,
+        scraper_name: str,
+        jobs: List[Dict],
+        total_scraper_jobs: int,
+        update: bool = False
+    ) -> str:
+        """
+        Format markdown body for insufficient content issue.
+
+        Args:
+            scraper_name: Name of the scraper
+            jobs: List of job dicts with keys: filename, url, content_length, sample_content
+            total_scraper_jobs: Total cache files for this scraper
+            update: Whether this is an update to an existing issue
+
+        Returns:
+            Formatted markdown string
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if update:
+            body = f"\n\n---\n\n## Update: {timestamp}\n\n"
+        else:
+            body = f"## Insufficient Content Report\n\n"
+            body += f"**Scraper:** `{scraper_name}`\n\n"
+
+        body += f"**Found:** {len(jobs)} jobs with insufficient content\n"
+        body += f"**Total Jobs:** {total_scraper_jobs} cache files for this scraper\n"
+        body += f"**Percentage:** {len(jobs)/total_scraper_jobs*100:.1f}%\n\n"
+
+        # Content length stats
+        lengths = [j['content_length'] for j in jobs]
+        body += f"**Content Length Range:** {min(lengths)}-{max(lengths)} chars "
+        body += f"(threshold: 200 chars)\n\n"
+
+        # Table of jobs (limit to 30)
+        body += f"### Jobs with Insufficient Content\n\n"
+        body += "| Cache File | URL | Length |\n"
+        body += "|------------|-----|--------|\n"
+
+        for job in jobs[:30]:
+            # Truncate long filenames/URLs for table
+            filename = job['filename'][:40] + '...' if len(job['filename']) > 40 else job['filename']
+            url = job['url'][:60] + '...' if len(job['url']) > 60 else job['url']
+            body += f"| `{filename}` | {url} | {job['content_length']} |\n"
+
+        if len(jobs) > 30:
+            body += f"\n*... and {len(jobs) - 30} more jobs*\n"
+
+        # Sample content from first 3
+        body += f"\n### Sample Content\n\n"
+        for i, job in enumerate(jobs[:3], 1):
+            body += f"<details>\n"
+            body += f"<summary>Sample {i}: {job['filename']}</summary>\n\n"
+            body += f"**URL:** {job['url']}\n\n"
+            body += f"**Content ({job['content_length']} chars):**\n"
+            body += f"```\n{job['sample_content']}\n```\n\n"
+            body += f"</details>\n\n"
+
+        # Recommendations
+        body += f"### Recommended Actions\n\n"
+        body += "- [ ] Check if scraper selectors need updating\n"
+        body += "- [ ] Verify if pages require JavaScript rendering\n"
+        body += "- [ ] Check if site structure changed\n"
+        body += "- [ ] Test scraper manually on sample URLs\n"
+        body += "- [ ] Consider using nodriver for dynamic content\n\n"
+
+        body += "---\n"
+        body += "*This issue was automatically generated by process_jobs.py*\n"
+
+        return body
+
+    def handle_insufficient_content(
+        self,
+        scraper_name: str,
+        jobs: List[Dict],
+        total_scraper_jobs: int
+    ) -> bool:
+        """
+        Create or update GitHub issue for insufficient content jobs.
+
+        Args:
+            scraper_name: Name of the scraper
+            jobs: List of job dicts with keys: filename, url, content_length, sample_content
+            total_scraper_jobs: Total cache files for this scraper
+
+        Returns:
+            True if issue created/updated successfully, False otherwise
+        """
+        try:
+            self.logger.info(f"Processing insufficient content for scraper: {scraper_name}")
+
+            # Check for existing issue
+            existing_issue = self.find_existing_insufficient_content_issue(scraper_name)
+
+            # Format issue body
+            body = self.format_insufficient_content_body(
+                scraper_name,
+                jobs,
+                total_scraper_jobs,
+                update=bool(existing_issue)
+            )
+
+            if existing_issue:
+                # Update existing issue with comment
+                self.logger.info(f"Updating existing issue #{existing_issue}")
+                success, output = self._run_gh_command([
+                    "issue", "comment", str(existing_issue),
+                    "--body", body
+                ])
+
+                if not success:
+                    self.logger.error(f"Failed to update issue: {output}")
+                    return False
+
+                self.logger.info(f"Successfully updated issue #{existing_issue}")
+                return True
+            else:
+                # Create new issue
+                timestamp = datetime.now().strftime("%Y-%m-%d")
+                title = f"Insufficient Content: {scraper_name} - {timestamp}"
+
+                # Ensure required labels exist
+                requested_labels = ["insufficient-content", "auto-generated", f"scraper:{scraper_name}"]
+                confirmed_labels = self._ensure_labels_exist(requested_labels)
+
+                # Build the issue creation command
+                cmd = [
+                    "issue", "create",
+                    "--title", title,
+                    "--body", body
+                ]
+
+                # Add labels that were confirmed to exist
+                for label in confirmed_labels:
+                    cmd.extend(["--label", label])
+
+                # Create the issue
+                success, output = self._run_gh_command(cmd)
+
+                if not success:
+                    self.logger.error(f"Failed to create issue: {output}")
+                    return False
+
+                # Extract issue number from output
+                try:
+                    # gh issue create returns URL like: https://github.com/owner/repo/issues/123
+                    issue_url = output.strip()
+                    issue_number = int(issue_url.split('/')[-1])
+                    self.logger.info(f"Created issue #{issue_number}: {issue_url}")
+                    return True
+                except (ValueError, IndexError) as e:
+                    self.logger.error(f"Could not parse issue number from output: {e}")
+                    return False
+
+        except Exception as e:
+            self.logger.error(f"Error handling insufficient content: {e}")
             return False
 
 
