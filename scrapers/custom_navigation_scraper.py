@@ -95,7 +95,7 @@ class CustomNavigationScraper(BaseScraper):
             return False
 
         # Find next button
-        next_button = await self.tab.query_selector(next_page_selector)
+        next_button = await self.tab.select(next_page_selector)
         if not next_button:
             self.logger.info("No more next button found")
             return False
