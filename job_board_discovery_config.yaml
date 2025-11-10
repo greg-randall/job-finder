@@ -4,10 +4,10 @@
 # Search engine configuration
 search_engine:
   base_url: "https://leta.mullvad.net/search"
-  engine: "brave"  # Search engine to use
+  engine: ""  # Search engine to use
   rate_limit:
     min_delay_seconds: 5  # Minimum seconds between requests
-    retry_delay_seconds: 60  # Seconds to wait on 429 error
+    retry_delay_seconds: 30  # Seconds to wait on 429 error
     max_retries: 3  # Max retries for 429 errors
 
 # Keywords for job-related terms
