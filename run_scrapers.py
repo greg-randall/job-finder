@@ -106,12 +106,57 @@ async def run_site(site_config: dict, logger) -> dict:
         }
 
 
+async def run_backend_worker(
+    backend_type: str,
+    sites: List[dict],
+    logger
+) -> dict:
+    """
+    Worker function to run all sites for a specific backend sequentially.
+
+    Args:
+        backend_type: The backend/scraper type (e.g., 'workday', 'icims')
+        sites: List of site configurations for this backend
+        logger: Logger instance
+
+    Returns:
+        Dictionary with success/failure counts for this backend
+    """
+    logger.info(f"[{backend_type.upper()}] Starting worker with {len(sites)} sites")
+
+    successful = 0
+    failed = 0
+
+    for index, site_config in enumerate(sites, 1):
+        site_name = site_config.get('name', 'unknown')
+        logger.info(f"[{backend_type.upper()}] Site {index}/{len(sites)}: {site_name}")
+
+        result = await run_site(site_config, logger)
+
+        if result.get('success'):
+            successful += 1
+        else:
+            failed += 1
+
+    logger.info(f"[{backend_type.upper()}] Worker complete: {successful} successful, {failed} failed")
+
+    return {
+        'backend': backend_type,
+        'successful': successful,
+        'failed': failed
+    }
+
+
 async def run_scrapers(
     group: Optional[str] = None,
     site: Optional[str] = None
 ) -> None:
     """
-    Run scrapers based on filters.
+    Run scrapers based on filters with backend-based parallelization.
+
+    Sites are grouped by their scraper type (backend), and one scraper per
+    backend runs at a time. Different backends run in parallel for maximum
+    efficiency while avoiding rate limiting issues.
 
     Args:
         group: Optional group name to filter by
@@ -143,24 +188,48 @@ async def run_scrapers(
         sites = config.get_enabled_sites()
         logger.info(f"Running all enabled scrapers ({len(sites)} sites)")
 
+    # Group sites by scraper type (backend)
+    from collections import defaultdict
+    backend_groups = defaultdict(list)
+
+    for site_config in sites:
+        # Note: config loader prefixes with underscore
+        scraper_type = site_config.get('_type', site_config.get('type', 'unknown'))
+        backend_groups[scraper_type].append(site_config)
+
+    # Log backend distribution
+    logger.info(f"\n{'='*80}")
+    logger.info("Backend Distribution (for parallel execution)")
+    logger.info(f"{'='*80}")
+    for backend_type, backend_sites in backend_groups.items():
+        logger.info(f"  {backend_type}: {len(backend_sites)} sites")
+    logger.info(f"Total backends: {len(backend_groups)}")
+    logger.info(f"Max concurrent scrapers: {len(backend_groups)}")
+    logger.info(f"{'='*80}\n")
+
     # Track results
     total_sites = len(sites)
+
+    # Run backend workers in parallel
+    logger.info("Starting parallel execution...")
+    tasks = [
+        run_backend_worker(backend_type, backend_sites, logger)
+        for backend_type, backend_sites in backend_groups.items()
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Aggregate results
     successful = 0
     failed = 0
 
-    # Run each site
-    for index, site_config in enumerate(sites, 1):
-        site_name = site_config.get('name', 'unknown')
-        logger.info(f"\n{'='*80}")
-        logger.info(f"Site {index}/{total_sites}: {site_name}")
-        logger.info(f"{'='*80}")
-
-        result = await run_site(site_config, logger)
-
-        if result.get('success'):
-            successful += 1
-        else:
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Backend worker failed with exception: {result}")
             failed += 1
+        elif isinstance(result, dict):
+            successful += result.get('successful', 0)
+            failed += result.get('failed', 0)
 
     # Print summary
     logger.info(f"\n{'='*80}")
@@ -169,6 +238,7 @@ async def run_scrapers(
     logger.info(f"Total sites processed: {total_sites}")
     logger.info(f"Successful: {successful}")
     logger.info(f"Failed: {failed}")
+    logger.info(f"Backends run in parallel: {len(backend_groups)}")
 
     # Write detailed summary to file
     summary_path = logger.write_summary()
