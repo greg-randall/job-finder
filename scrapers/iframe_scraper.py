@@ -66,12 +66,16 @@ class IframeScraper(BaseScraper):
             return []
 
         try:
+            # Add a sleep to wait for the iframe to load
+            self.logger.debug("Waiting 5 seconds for iframe content to load...")
+            await self.tab.sleep(5)
+
             # Extract links from iframe using JavaScript
             if job_link_filter:
                 # Use custom filter function
                 job_links = await self.tab.evaluate(f'''() => {{
                     const iframe = document.querySelector('{iframe_selector}');
-                    if (!iframe || !iframe.contentDocument) return [];
+                    if (!iframe || !iframe.contentDocument) return null; // Return null to indicate iframe issue
                     const doc = iframe.contentDocument;
                     const elements = doc.querySelectorAll('{job_link_selector}');
                     const filterFn = {job_link_filter};
@@ -83,11 +87,15 @@ class IframeScraper(BaseScraper):
                 # Simple extraction
                 job_links = await self.tab.evaluate(f'''() => {{
                     const iframe = document.querySelector('{iframe_selector}');
-                    if (!iframe || !iframe.contentDocument) return [];
+                    if (!iframe || !iframe.contentDocument) return null; // Return null to indicate iframe issue
                     const doc = iframe.contentDocument;
                     const elements = doc.querySelectorAll('{job_link_selector}');
                     return Array.from(elements).map(el => el.href);
                 }}''')
+
+            if job_links is None:
+                self.logger.warning("Could not find iframe or its content document.")
+                return []
 
             self.logger.debug(f"Extracted {len(job_links)} job links from iframe")
             return job_links

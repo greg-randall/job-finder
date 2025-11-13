@@ -129,8 +129,29 @@ browser:
     - '#accept-cookies'
 
 # ----------------------------------------------------------------------------
+# Scraper Performance Settings
+# ----------------------------------------------------------------------------
+# These settings control scraper optimization and can be overridden per-site
+scraper_settings:
+  # Early stopping optimization: Stop scraping when hitting pages with only cached jobs
+  early_stop_on_cached: true
+
+  # Minimum new jobs per page to continue (0 = stop when all jobs are cached)
+  min_new_jobs_per_page: 0
+
+  # Maximum pages to scrape (null = unlimited, or set a number like 10)
+  max_pages: null
+
+# ----------------------------------------------------------------------------
 # Job Boards Configuration
 # ----------------------------------------------------------------------------
+# Each site can override scraper_settings by adding a 'settings' section
+# Example:
+#   - name: "example_site"
+#     url: "https://example.com/jobs"
+#     settings:
+#       early_stop_on_cached: false  # Disable for this site
+#       max_pages: 5                  # Only scrape first 5 pages
 job_boards:
   # Standard Pagination Sites (Workday-style)
   - group: "workday"

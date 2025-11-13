@@ -20,7 +20,6 @@ from typing import List, Optional
 from config_loader import get_config
 from logging_config import get_logger
 from scrapers import create_scraper
-from github_issue_handler import report_scraper_failure
 
 
 async def run_site(site_config: dict, logger) -> dict:
@@ -48,56 +47,43 @@ async def run_site(site_config: dict, logger) -> dict:
         # Create appropriate scraper with site-specific logger
         scraper = create_scraper(site_config, logger=site_logger)
 
-        # Run the scraper
-        result = await scraper.scrape()
+        # Run the scraper with a 60-second timeout
+        try:
+            result = await asyncio.wait_for(scraper.scrape(), timeout=60.0)
+        except asyncio.TimeoutError:
+            site_logger.error(f"Scraper for {site_name} timed out after 60 seconds.")
+            logger.increment_stat("sites_failed")
+            # Capture error context if possible
+            try:
+                if scraper.tab:
+                    current_url = await scraper.tab.evaluate('window.location.href')
+                    await site_logger.capture_error_context(
+                        error_type="ScraperTimeout",
+                        error_message="Scraper timed out after 60 seconds",
+                        url=current_url,
+                        page=scraper.tab,
+                    )
+            except Exception as context_error:
+                site_logger.warning(f"Could not capture timeout context: {str(context_error)}")
+
+            return {
+                'success': False,
+                'reason': 'timeout',
+                'stats': scraper.stats if hasattr(scraper, 'stats') else {}
+            }
+
 
         if result.get('success'):
             logger.increment_stat("sites_processed")
         else:
             logger.increment_stat("sites_failed")
-
-            # Report failure to GitHub
-            site_logger.info(f"Reporting scraper failure to GitHub for: {site_name}")
-            error_summary = result.get('reason', 'Unknown error occurred')
-            stats = result.get('stats', {})
-
-            try:
-                success = report_scraper_failure(
-                    scraper_name=site_name,
-                    scraper_url=site_url,
-                    error_summary=error_summary,
-                    stats=stats,
-                    logger=site_logger.logger  # Pass the underlying logging.Logger instance
-                )
-                if success:
-                    site_logger.info(f"✓ GitHub issue created/updated for {site_name}")
-                else:
-                    site_logger.warning(f"Failed to create/update GitHub issue for {site_name}")
-            except Exception as gh_error:
-                site_logger.warning(f"Error reporting to GitHub: {gh_error}")
+            site_logger.error(f"Scraper failed for {site_name}: {result.get('reason', 'Unknown error')}")
 
         return result
 
     except Exception as e:
         site_logger.error(f"Failed to scrape {site_name}: {str(e)}")
         logger.increment_stat("sites_failed")
-
-        # Report failure to GitHub
-        error_summary = f"Exception during scraping: {str(e)}"
-        try:
-            success = report_scraper_failure(
-                scraper_name=site_name,
-                scraper_url=site_url,
-                error_summary=error_summary,
-                stats={},
-                logger=site_logger.logger  # Pass the underlying logging.Logger instance
-            )
-            if success:
-                site_logger.info(f"✓ GitHub issue created/updated for {site_name}")
-            else:
-                site_logger.warning(f"Failed to create/update GitHub issue for {site_name}")
-        except Exception as gh_error:
-            site_logger.warning(f"Error reporting to GitHub: {gh_error}")
 
         return {
             'success': False,
@@ -239,6 +225,11 @@ async def run_scrapers(
     logger.info(f"Successful: {successful}")
     logger.info(f"Failed: {failed}")
     logger.info(f"Backends run in parallel: {len(backend_groups)}")
+
+    # Show performance optimization info if any scrapers used early stopping
+    logger.info(f"\nPerformance: Early stopping optimization is active")
+    logger.info(f"  Scrapers will stop when hitting pages with 100% cached jobs")
+    logger.info(f"  See individual scraper logs for early-stop details")
 
     # Write detailed summary to file
     summary_path = logger.write_summary()

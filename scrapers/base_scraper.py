@@ -2,12 +2,13 @@
 Base scraper class providing common functionality for all scrapers.
 """
 
+import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from config_loader import get_config
-from functions import init_browser, navigate_with_retries, download_all_links, DownloadStats, wait_for_selector
+from functions import init_browser, navigate_with_retries, download_all_links, DownloadStats, wait_for_selector, generate_cache_filename
 from logging_config import ScraperLogger, get_logger
 
 
@@ -55,7 +56,13 @@ class BaseScraper(ABC):
             'jobs_found': 0,
             'jobs_downloaded': 0,
             'jobs_skipped': 0,
-            'errors': 0
+            'errors': 0,
+            'early_stopped': False,
+            'cached_on_last_page': 0,
+            'new_on_last_page': 0,
+            'total_pages_available': 0,
+            'total_new_jobs': 0,
+            'total_cached_jobs': 0
         }
 
     @abstractmethod
@@ -95,7 +102,8 @@ class BaseScraper(ABC):
         self.logger.debug("Cleaning up browser resources...")
         try:
             if self.browser:
-                self.browser.stop()
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.browser.stop)
         except Exception as e:
             self.logger.warning(f"Error during cleanup: {str(e)}")
 
@@ -159,7 +167,9 @@ class BaseScraper(ABC):
         """
         Scrape all pages and collect job links.
 
-        This method implements the main pagination loop.
+        This method implements the main pagination loop with smart early stopping.
+        If enabled, stops when a page contains only already-cached jobs.
+
         Subclasses can override this for custom behavior.
 
         Returns:
@@ -167,6 +177,15 @@ class BaseScraper(ABC):
         """
         all_job_links: List[str] = []
         page_num = 1
+
+        # Get early stopping configuration
+        early_stop_enabled = self.settings.get('early_stop_on_cached', True)
+        min_new_jobs = self.settings.get('min_new_jobs_per_page', 0)
+        max_pages = self.settings.get('max_pages', None)
+
+        # Track overall cache statistics
+        total_new_jobs = 0
+        total_cached_jobs = 0
 
         while True:
             self.logger.info(f"Scraping page {page_num}...")
@@ -178,12 +197,52 @@ class BaseScraper(ABC):
             self.stats['pages_scraped'] = page_num
             self.stats['jobs_found'] = len(all_job_links)
 
-            self.logger.info(f"Page {page_num}: Found {len(job_links)} job links")
+            # Check cache status for early stopping
+            if early_stop_enabled and len(job_links) > 0:
+                cached_count = 0
+                for job_url in job_links:
+                    cache_file = generate_cache_filename(self.name, job_url)
+                    if cache_file.exists():
+                        cached_count += 1
+
+                new_count = len(job_links) - cached_count
+                cache_percentage = (cached_count / len(job_links)) * 100
+
+                # Update overall totals
+                total_new_jobs += new_count
+                total_cached_jobs += cached_count
+
+                self.stats['cached_on_last_page'] = cached_count
+                self.stats['new_on_last_page'] = new_count
+                self.stats['total_new_jobs'] = total_new_jobs
+                self.stats['total_cached_jobs'] = total_cached_jobs
+
+                self.logger.info(
+                    f"Page {page_num}: Found {len(job_links)} job links "
+                    f"({new_count} new, {cached_count} cached - {cache_percentage:.1f}%)"
+                )
+
+                # Early stop if all jobs on this page are cached
+                if new_count <= min_new_jobs:
+                    self.stats['early_stopped'] = True
+                    self.logger.info(
+                        f"⚡ Early stopping at page {page_num}: "
+                        f"All jobs already cached (found {min_new_jobs} or fewer new jobs)"
+                    )
+                    break
+            else:
+                self.logger.info(f"Page {page_num}: Found {len(job_links)} job links")
+
+            # Check max pages limit if configured
+            if max_pages and page_num >= max_pages:
+                self.logger.info(f"Reached max_pages limit ({max_pages})")
+                break
 
             # Try to navigate to next page
             has_next = await self.navigate_to_next_page()
             if not has_next:
-                self.logger.info("Reached last page")
+                self.logger.info("Reached last page (no next button)")
+                self.stats['total_pages_available'] = page_num
                 break
 
             page_num += 1
@@ -224,9 +283,33 @@ class BaseScraper(ABC):
             all_job_links = await self.scrape_all_pages()
 
             # Log summary
+            self.logger.info(f"\n{'='*60}")
             self.logger.info(f"Summary for {self.name}:")
-            self.logger.info(f"  - Pages scraped: {self.stats['pages_scraped']}")
-            self.logger.info(f"  - Job links found: {self.stats['jobs_found']}")
+            self.logger.info(f"{'='*60}")
+            self.logger.info(f"  Pages scraped: {self.stats['pages_scraped']}")
+            self.logger.info(f"  Total jobs found: {self.stats['jobs_found']}")
+
+            # Show cache efficiency stats if available
+            if self.stats['total_new_jobs'] > 0 or self.stats['total_cached_jobs'] > 0:
+                total_jobs = self.stats['total_new_jobs'] + self.stats['total_cached_jobs']
+                cache_rate = (self.stats['total_cached_jobs'] / total_jobs * 100) if total_jobs > 0 else 0
+                self.logger.info(f"  New jobs: {self.stats['total_new_jobs']}")
+                self.logger.info(f"  Already cached: {self.stats['total_cached_jobs']} ({cache_rate:.1f}%)")
+
+            # Show early stopping info
+            if self.stats['early_stopped']:
+                self.logger.info(f"\n  ⚡ Early Stopping Activated:")
+                self.logger.info(f"     Stopped at page {self.stats['pages_scraped']} (100% cached jobs)")
+
+                # Estimate time saved if we know there are more pages
+                # (Conservative estimate: assume at least 2-3 more pages could have existed)
+                if self.stats['jobs_found'] >= self.stats['pages_scraped'] * 15:  # Average 15+ jobs per page
+                    self.logger.info(f"     Likely saved time by not loading additional pages")
+                    self.logger.info(f"     (All jobs on last page were already cached)")
+            elif self.stats['total_pages_available'] > 0:
+                self.logger.info(f"  Completed: Scraped all {self.stats['total_pages_available']} available pages")
+
+            self.logger.info(f"{'='*60}\n")
 
             self.logger.increment_stat("total_jobs_found", self.stats['jobs_found'])
 

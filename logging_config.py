@@ -31,14 +31,21 @@ class ScraperLogger:
         self.scraper_name = scraper_name
         self.start_time = datetime.now()
         self.timestamp_str = self.start_time.strftime("%Y-%m-%d_%H%M%S")
+        self.unix_timestamp = int(self.start_time.timestamp())
 
         # Create log directories
         self.log_dir = Path("logs")
-        self.error_dir = self.log_dir / "errors"
         self.summary_dir = self.log_dir / "summaries"
 
-        for directory in [self.log_dir, self.error_dir, self.summary_dir]:
+        for directory in [self.log_dir, self.summary_dir]:
             directory.mkdir(exist_ok=True)
+
+        # Create timestamped error folder in errors/unfixed
+        self.error_dir = Path("errors") / "unfixed" / f"{scraper_name}_{self.unix_timestamp}"
+        self.error_dir.mkdir(parents=True, exist_ok=True)
+
+        # Store path to the main log file for later copying
+        self.log_file_path = self.log_dir / f"scraper_{self.scraper_name}_{self.timestamp_str}.log"
 
         # Operation breadcrumbs for context
         self.operation_history: List[str] = []
@@ -82,8 +89,7 @@ class ScraperLogger:
         console_handler.setFormatter(console_formatter)
 
         # File handler - detailed debug output
-        log_file = self.log_dir / f"scraper_{self.scraper_name}_{self.timestamp_str}.log"
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler = logging.FileHandler(self.log_file_path, encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -242,7 +248,8 @@ class ScraperLogger:
     @staticmethod
     def clean_html_for_debugging(html_content: str) -> Tuple[str, Dict[str, int]]:
         """
-        Clean HTML content by removing scripts, styles, and inline styles.
+        Clean HTML content by removing scripts, styles, inline styles, image data,
+        non-whitelisted attributes, and SVG content.
 
         Args:
             html_content: Raw HTML content
@@ -255,7 +262,10 @@ class ScraperLogger:
             'script_chars_removed': 0,
             'style_tags_removed': 0,
             'style_chars_removed': 0,
-            'inline_styles_removed': 0
+            'inline_styles_removed': 0,
+            'image_data_urls_removed': 0,
+            'svg_tags_cleaned': 0,
+            'attributes_removed': 0
         }
 
         # Remove script tags and count them
@@ -278,6 +288,45 @@ class ScraperLogger:
         stats['inline_styles_removed'] = len(inline_styles)
         cleaned = inline_style_pattern.sub('', cleaned)
 
+        # Remove image data URLs (src="data:image/...")
+        image_data_pattern = re.compile(r'\s+src\s*=\s*["\']data:image/[^"\']*["\']', re.IGNORECASE)
+        image_data_urls = image_data_pattern.findall(cleaned)
+        stats['image_data_urls_removed'] = len(image_data_urls)
+        cleaned = image_data_pattern.sub('', cleaned)
+
+        # Clean SVG tags - keep opening/closing tags with whitelisted attributes, remove content
+        svg_pattern = re.compile(r'<svg\b([^>]*)>(.*?)</svg>', re.IGNORECASE | re.DOTALL)
+        def clean_svg(match):
+            attrs = match.group(1)
+            # Keep only whitelisted attributes from SVG tag
+            cleaned_attrs = ScraperLogger._clean_attributes(attrs)
+            stats['svg_tags_cleaned'] += 1
+            return f'<svg{cleaned_attrs}><!-- SVG content removed --></svg>'
+
+        cleaned = svg_pattern.sub(clean_svg, cleaned)
+
+        # Remove non-whitelisted attributes from all tags
+        # Whitelist: id, class, href, src, type, name, value, role, for, action, method, alt
+        tag_pattern = re.compile(r'<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>', re.IGNORECASE)
+
+        def clean_tag_attributes(match):
+            tag_name = match.group(1)
+            attrs = match.group(2)
+
+            # Skip if no attributes
+            if not attrs.strip():
+                return match.group(0)
+
+            original_attr_count = len(re.findall(r'\b[\w-]+\s*=', attrs))
+            cleaned_attrs = ScraperLogger._clean_attributes(attrs)
+            new_attr_count = len(re.findall(r'\b[\w-]+\s*=', cleaned_attrs))
+
+            stats['attributes_removed'] += (original_attr_count - new_attr_count)
+
+            return f'<{tag_name}{cleaned_attrs}>'
+
+        cleaned = tag_pattern.sub(clean_tag_attributes, cleaned)
+
         # Add summary comment at the top
         summary_lines = []
         if stats['script_tags_removed'] > 0:
@@ -294,12 +343,56 @@ class ScraperLogger:
             summary_lines.append(
                 f"<!-- Removed {stats['inline_styles_removed']} inline style attribute(s) -->"
             )
+        if stats['image_data_urls_removed'] > 0:
+            summary_lines.append(
+                f"<!-- Removed {stats['image_data_urls_removed']} image data URL(s) -->"
+            )
+        if stats['svg_tags_cleaned'] > 0:
+            summary_lines.append(
+                f"<!-- Cleaned {stats['svg_tags_cleaned']} SVG tag(s) (removed internal content) -->"
+            )
+        if stats['attributes_removed'] > 0:
+            summary_lines.append(
+                f"<!-- Removed {stats['attributes_removed']} non-whitelisted attribute(s) -->"
+            )
 
         if summary_lines:
             summary = '\n'.join(summary_lines) + '\n\n'
             cleaned = summary + cleaned
 
         return cleaned, stats
+
+    @staticmethod
+    def _clean_attributes(attrs_string: str) -> str:
+        """
+        Clean attributes string, keeping only whitelisted attributes.
+
+        Whitelisted attributes: id, class, href, src, type, name, value, role, for, action, method, alt
+
+        Args:
+            attrs_string: String containing HTML attributes
+
+        Returns:
+            Cleaned attributes string with only whitelisted attributes
+        """
+        whitelist = {'id', 'class', 'href', 'src', 'type', 'name', 'value', 'role', 'for', 'action', 'method', 'alt'}
+
+        # Pattern to match individual attributes
+        attr_pattern = re.compile(r'\b([\w-]+)\s*=\s*(["\'][^"\']*["\']|[^\s>]+)', re.IGNORECASE)
+
+        cleaned_attrs = []
+        for match in attr_pattern.finditer(attrs_string):
+            attr_name = match.group(1).lower()
+            attr_value = match.group(2)
+
+            # Keep only whitelisted attributes
+            if attr_name in whitelist:
+                cleaned_attrs.append(f'{attr_name}={attr_value}')
+
+        # Return with leading space if attributes exist
+        if cleaned_attrs:
+            return ' ' + ' '.join(cleaned_attrs)
+        return ''
 
     async def capture_error_context(
         self,
@@ -371,22 +464,26 @@ class ScraperLogger:
                 self.logger.warning(f"Failed to capture HTML: {e}")
 
             try:
-                # Save full, raw HTML for deep debugging
-                full_raw_html = await page.evaluate('document.documentElement.outerHTML')
-                full_html_file = self.error_dir / f"{timestamp_str}_page_full.html"
-                with open(full_html_file, 'w', encoding='utf-8') as f:
-                    f.write(full_raw_html)
-                
-                error_data["html_full_file"] = str(full_html_file)
-                error_data["html_full_size_bytes"] = len(full_raw_html)
-                self.logger.debug(f"Saved full HTML dump: {full_html_file}")
-            except Exception as e:
-                error_data["full_html_capture_error"] = str(e)
-                self.logger.warning(f"Failed to capture full HTML: {e}")
+                # Set viewport to 1920x1080 before capturing screenshot
+                try:
+                    await page.evaluate('''() => {
+                        window.resizeTo(1920, 1080);
+                    }''')
+                    # Alternative method using CDP
+                    await page.send(
+                        'Emulation.setDeviceMetricsOverride',
+                        {
+                            'width': 1920,
+                            'height': 1080,
+                            'deviceScaleFactor': 1,
+                            'mobile': False
+                        }
+                    )
+                except Exception as resize_error:
+                    self.logger.debug(f"Could not resize viewport for screenshot: {resize_error}")
 
-            try:
                 # Capture screenshot (nodriver uses save_screenshot)
-                screenshot_file = self.error_dir / f"{timestamp_str}_screenshot.png"
+                screenshot_file = self.error_dir / f"{timestamp_str}_screenshot.jpg"
                 await page.save_screenshot(str(screenshot_file))
                 error_data["screenshot_file"] = str(screenshot_file)
                 self.logger.debug(f"Captured screenshot: {screenshot_file}")
@@ -407,8 +504,61 @@ class ScraperLogger:
         with open(error_json_file, 'w', encoding='utf-8') as f:
             json.dump(error_data, f, indent=2, ensure_ascii=False)
 
+        # Copy log excerpts to error folder
+        self.copy_log_excerpts()
+
         self.logger.error(f"Error context saved: {error_json_file}")
         return str(error_json_file)
+
+    def copy_log_excerpts(self):
+        """
+        Copy relevant log excerpts (errors, warnings, and context) to the error folder.
+
+        This method extracts important log lines from the full log file and saves them
+        to scraper.log in the error folder for easier debugging.
+        """
+        try:
+            if not self.log_file_path.exists():
+                self.logger.warning(f"Log file not found: {self.log_file_path}")
+                return
+
+            # Read the log file
+            with open(self.log_file_path, 'r', encoding='utf-8') as f:
+                log_lines = f.readlines()
+
+            # Extract relevant lines (errors, warnings, and some context)
+            relevant_lines = []
+            context_buffer = []  # Keep last 3 lines for context
+            context_size = 3
+
+            for line in log_lines:
+                # Add to context buffer
+                context_buffer.append(line)
+                if len(context_buffer) > context_size:
+                    context_buffer.pop(0)
+
+                # Check if line is important (ERROR, WARNING, CRITICAL)
+                if any(level in line for level in ['ERROR', 'WARNING', 'CRITICAL']):
+                    # Add context lines if not already added
+                    for ctx_line in context_buffer[:-1]:
+                        if ctx_line not in relevant_lines:
+                            relevant_lines.append(ctx_line)
+                    # Add the important line
+                    if line not in relevant_lines:
+                        relevant_lines.append(line)
+                    context_buffer.clear()
+
+            # Write excerpts to error folder
+            excerpt_file = self.error_dir / "scraper.log"
+            with open(excerpt_file, 'w', encoding='utf-8') as f:
+                f.write(f"# Log excerpts from {self.scraper_name} (errors and warnings only)\n")
+                f.write(f"# Full log available at: {self.log_file_path}\n")
+                f.write(f"# Generated: {datetime.now().isoformat()}\n\n")
+                f.writelines(relevant_lines)
+
+            self.logger.debug(f"Log excerpts copied to: {excerpt_file}")
+        except Exception as e:
+            self.logger.warning(f"Failed to copy log excerpts: {e}")
 
     def update_stats(self, **kwargs):
         """Update statistics dictionary."""

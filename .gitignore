@@ -12,3 +12,4 @@ debug_screenshots/
 *.csv
 logs/
 *.swp
+old/*

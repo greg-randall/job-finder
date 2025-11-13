@@ -362,8 +362,26 @@ async def init_browser(headless: bool = False):
             browser_args=[
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
+                '--window-size=1920,1080',
             ]
         )
+
+        # Set viewport size to 1920x1080 for the first tab
+        try:
+            tab = browser.tabs[0]
+            await tab.send(
+                'Emulation.setDeviceMetricsOverride',
+                {
+                    'width': 1920,
+                    'height': 1080,
+                    'deviceScaleFactor': 1,
+                    'mobile': False
+                }
+            )
+        except Exception as viewport_error:
+            # Non-critical error, continue without setting viewport
+            print(f"Could not set default viewport: {viewport_error}")
+
         return browser
     except Exception as e:
         raise BrowserInitializationError(f"Failed to launch browser: {str(e)}") from e
@@ -523,17 +541,32 @@ async def wait_for_selector(
     timeout_seconds = timeout / 1000
     poll_seconds = poll_interval / 1000
 
+    if logger:
+        logger.debug(f"Starting to wait for selector '{selector}' for {timeout_seconds}s")
+
     try:
         while start_time < timeout_seconds:
+            if logger:
+                logger.debug(f"[{start_time:.1f}s] Checking for selector: {selector}")
+
             # Check if element exists
             element = await tab.select(selector)
+            
+            if logger:
+                logger.debug(f"[{start_time:.1f}s] Selector check done. Found: {element is not None}")
+
             if element:
                 if logger:
                     logger.debug(f"Element found: {selector} (waited {start_time:.1f}s)")
                 return True
 
             # Wait before next check
+            if logger:
+                logger.debug(f"[{start_time:.1f}s] Sleeping for {poll_seconds}s")
             await tab.sleep(poll_seconds)
+            if logger:
+                logger.debug(f"[{start_time:.1f}s] Woke up from sleep")
+
             start_time += poll_seconds
 
         # Timeout reached
@@ -578,9 +611,12 @@ async def wait_for_selector(
 # CONTENT DOWNLOAD FUNCTIONS
 # ============================================================================
 
-def _generate_cache_filename(name: str, url: str) -> Path:
+def generate_cache_filename(name: str, url: str) -> Path:
     """
     Generate a unique cache filename for a URL.
+
+    Public utility function for generating cache filenames, useful for
+    checking if a job URL has already been cached before downloading.
 
     Args:
         name: Name prefix for the file.
@@ -597,6 +633,14 @@ def _generate_cache_filename(name: str, url: str) -> Path:
     url_hash = hashlib.sha256(url.encode()).hexdigest()
     filename = f"{name}_{url_hash}.txt"
     return Paths.CACHE_DIR / filename
+
+
+def _generate_cache_filename(name: str, url: str) -> Path:
+    """
+    Deprecated: Use generate_cache_filename() instead.
+    Kept for backward compatibility.
+    """
+    return generate_cache_filename(name, url)
 
 
 async def _download_single_link(

@@ -41,7 +41,7 @@ async def scrape_icims_site(url, logger):
         os.makedirs(screenshot_dir, exist_ok=True)
         os.makedirs(html_dir, exist_ok=True)
 
-        screenshot_path = os.path.join(screenshot_dir, f"{name}_page_load.png")
+        screenshot_path = os.path.join(screenshot_dir, f"{name}_page_load.jpg")
         await page.screenshot(path=screenshot_path, full_page=True)
         logger.info(f"Saved full page screenshot to {screenshot_path}")
 

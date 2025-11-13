@@ -129,6 +129,9 @@ class Config:
         enabled_sites = []
         boards = self.get_job_boards(enabled_only=True)
 
+        # Get global scraper settings as defaults
+        global_scraper_settings = self._config.get('scraper_settings', {})
+
         for board in boards:
             if group_name and board.get('group') != group_name:
                 continue
@@ -141,7 +144,13 @@ class Config:
                     site_with_group['_group'] = board.get('group')
                     site_with_group['_type'] = board.get('type')
                     site_with_group['_selectors'] = board.get('selectors', {})
-                    site_with_group['_settings'] = board.get('settings', {})
+
+                    # Merge settings: global < board < site (site-specific overrides all)
+                    merged_settings = global_scraper_settings.copy()
+                    merged_settings.update(board.get('settings', {}))
+                    merged_settings.update(site.get('settings', {}))
+                    site_with_group['_settings'] = merged_settings
+
                     enabled_sites.append(site_with_group)
 
         return enabled_sites

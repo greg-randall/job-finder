@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from itertools import product
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode
 
 import nodriver as uc
@@ -35,6 +35,9 @@ class JobBoardFinder:
         self.discovered_boards: Dict[str, Dict] = {}
         self.visited_urls: Set[str] = set()
         self.last_request_time = 0
+
+        # Per-domain adaptive rate limiting for validation
+        self.domain_delays: Dict[str, float] = {}  # domain -> current delay in seconds
 
         # Statistics tracking
         self.stats = {
@@ -74,11 +77,16 @@ class JobBoardFinder:
         return logging.getLogger(__name__)
 
     async def _save_debug_html(self, filename: str, description: str = ""):
-        """Save current page HTML for debugging."""
+        """Save current page HTML for debugging with enhanced cleaning."""
         try:
+            from logging_config import ScraperLogger
+
             html_content = await self.tab.evaluate('document.documentElement.outerHTML')
             page_url = await self.tab.evaluate('window.location.href')
             page_title = await self.tab.evaluate('document.title')
+
+            # Clean the HTML using the enhanced cleaning function
+            cleaned_html, cleaning_stats = ScraperLogger.clean_html_for_debugging(html_content)
 
             debug_file = DEBUG_DIR / f"{filename}.html"
             with open(debug_file, 'w', encoding='utf-8') as f:
@@ -86,9 +94,15 @@ class JobBoardFinder:
                 f.write(f"<!-- Title: {page_title} -->\n")
                 f.write(f"<!-- Description: {description} -->\n")
                 f.write(f"<!-- Timestamp: {datetime.now().isoformat()} -->\n\n")
-                f.write(html_content)
+                f.write(cleaned_html)
 
             self.logger.info(f"💾 Debug HTML saved: {debug_file}")
+            if cleaning_stats.get('attributes_removed', 0) > 0 or cleaning_stats.get('svg_tags_cleaned', 0) > 0:
+                self.logger.debug(
+                    f"   Cleaned: {cleaning_stats.get('attributes_removed', 0)} attrs, "
+                    f"{cleaning_stats.get('svg_tags_cleaned', 0)} SVGs, "
+                    f"{cleaning_stats.get('image_data_urls_removed', 0)} image data URLs"
+                )
             return debug_file
         except Exception as e:
             self.logger.error(f"Failed to save debug HTML: {e}")
@@ -97,7 +111,7 @@ class JobBoardFinder:
     async def _save_debug_screenshot(self, filename: str):
         """Save screenshot for debugging."""
         try:
-            screenshot_file = DEBUG_DIR / f"{filename}.png"
+            screenshot_file = DEBUG_DIR / f"{filename}.jpg"
             await self.tab.save_screenshot(str(screenshot_file))
             self.logger.info(f"📸 Screenshot saved: {screenshot_file}")
             return screenshot_file
@@ -137,6 +151,8 @@ class JobBoardFinder:
 
     def _generate_search_queries(self, max_queries: int = None) -> List[str]:
         """Generate search queries from keyword combinations."""
+        import random
+
         self.logger.info("🔍 Generating search queries...")
 
         job_keywords = self.config.get('job_keywords', [])
@@ -155,6 +171,10 @@ class JobBoardFinder:
             queries.append(query)
 
         self.logger.info(f"   Total possible combinations: {len(queries)}")
+
+        # RANDOMIZE order to avoid hitting same sites during debugging
+        random.shuffle(queries)
+        self.logger.info(f"   ⚡ Randomized query order")
 
         # Limit number of queries if specified
         if max_queries:
@@ -186,9 +206,38 @@ class JobBoardFinder:
 
         self.last_request_time = time.time()
 
+    async def _adaptive_rate_limit(self, domain: str) -> float:
+        """
+        Adaptive rate limiting per domain for validation.
+        Starts at 0.5s, doubles on 429/404 up to 30s.
+        Returns the current delay being used.
+        """
+        # Initialize domain delay if not seen before
+        if domain not in self.domain_delays:
+            self.domain_delays[domain] = 0.5  # Start with 0.5 seconds
+
+        delay = self.domain_delays[domain]
+        self.logger.debug(f"      ⏱️  Domain delay for {domain}: {delay}s")
+        await asyncio.sleep(delay)
+        return delay
+
+    def _increase_domain_delay(self, domain: str, reason: str = "error"):
+        """Double the delay for a domain, capping at 30 seconds."""
+        current = self.domain_delays.get(domain, 0.5)
+        new_delay = min(current * 2, 30.0)  # Cap at 30 seconds
+        self.domain_delays[domain] = new_delay
+        self.logger.info(f"      ⚠️  Increased delay for {domain}: {current}s → {new_delay}s (reason: {reason})")
+
+    def _reset_domain_delay(self, domain: str):
+        """Reset domain delay back to initial 0.5s after success."""
+        if domain in self.domain_delays and self.domain_delays[domain] > 0.5:
+            old_delay = self.domain_delays[domain]
+            self.domain_delays[domain] = 0.5
+            self.logger.debug(f"      ✅ Reset delay for {domain}: {old_delay}s → 0.5s")
+
     async def _handle_429_error(self, retry_count: int) -> bool:
         """
-        Handle 429 Too Many Requests error.
+        Handle 429 Too Many Requests error with exponential backoff.
         Returns True if should retry, False if max retries exceeded.
         """
         self.stats['rate_limits_hit'] += 1
@@ -199,11 +248,23 @@ class JobBoardFinder:
             self.logger.error(f"   Total 429 errors this session: {self.stats['rate_limits_hit']}")
             return False
 
-        retry_delay = self.config['search_engine']['rate_limit']['retry_delay_seconds']
+        # Exponential backoff: 30s, 60s, 120s, 240s...
+        base_delay = self.config['search_engine']['rate_limit']['retry_delay_seconds']
+        exponential_delay = base_delay * (2 ** retry_count)
+
+        # Add jitter (randomize by ±20%) to appear more human-like
+        import random
+        jitter = exponential_delay * 0.2 * (random.random() * 2 - 1)  # ±20%
+        actual_delay = exponential_delay + jitter
+
         self.logger.warning(f"⚠️  429 Too Many Requests detected!")
         self.logger.warning(f"   Retry {retry_count + 1}/{max_retries}")
-        self.logger.warning(f"   Sleeping {retry_delay}s before retry...")
-        await asyncio.sleep(retry_delay)
+        self.logger.warning(f"   Base delay: {base_delay}s")
+        self.logger.warning(f"   Exponential backoff: {exponential_delay}s")
+        self.logger.warning(f"   With jitter: {actual_delay:.1f}s")
+        self.logger.warning(f"   Sleeping {actual_delay:.1f}s before retry...")
+
+        await asyncio.sleep(actual_delay)
         self.logger.info(f"   Retrying now...")
         return True
 
@@ -271,6 +332,101 @@ class JobBoardFinder:
             self.logger.debug(f"Error checking for 429: {e}")
             return False
 
+    async def _wait_for_results_rendered(self, wait_seconds: int = 5) -> bool:
+        """
+        Wait for search results to be rendered, then check if they exist.
+
+        Args:
+            wait_seconds: Seconds to wait before checking for results.
+
+        Returns:
+            True if results were found, False otherwise.
+        """
+        self.logger.info(f"⏳ Waiting {wait_seconds}s for results to render...")
+
+        # Simple wait - results render quickly after search submission
+        await asyncio.sleep(wait_seconds)
+
+        try:
+            # Direct synchronous check - no Promise needed
+            articles_count = await self.tab.evaluate('document.querySelectorAll("article").length')
+            links_count = await self.tab.evaluate('document.querySelectorAll("a[href^=\\"http\\"]").length')
+
+            if articles_count > 0 or links_count > 5:
+                self.logger.info(f"✅ Results found: {articles_count} articles, {links_count} http links")
+                return True
+            else:
+                self.logger.warning(f"⚠️  No results found after {wait_seconds}s wait")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Error checking for results: {e}")
+            return False
+
+    async def _perform_interactive_search(self, query: str) -> bool:
+        """
+        Perform an interactive search by filling the search form and clicking submit.
+
+        Args:
+            query: The search query to enter.
+
+        Returns:
+            True if search was performed successfully, False otherwise.
+        """
+        try:
+            self.logger.info(f"🔍 Performing interactive search for: '{query}'")
+
+            # Navigate to homepage first
+            base_url = self.config['search_engine']['base_url'].split('/search')[0]
+            self.logger.info(f"📍 Navigating to: {base_url}")
+
+            try:
+                await asyncio.wait_for(self.tab.get(base_url), timeout=20)
+            except asyncio.TimeoutError:
+                self.logger.warning("Navigation timeout, but continuing...")
+
+            await asyncio.sleep(2)  # Give page time to load
+
+            # Find and focus on search input
+            self.logger.info("🔎 Looking for search input box...")
+            search_input = await self.tab.select('#search')
+
+            if not search_input:
+                self.logger.error("❌ Could not find search input box")
+                return False
+
+            self.logger.info("✅ Found search input box")
+
+            # Click the input to focus it
+            await search_input.click()
+            await asyncio.sleep(0.5)
+
+            # Type the query
+            self.logger.info(f"⌨️  Typing query: '{query}'")
+            await search_input.send_keys(query)
+            await asyncio.sleep(1)
+
+            # Find and click search button
+            self.logger.info("🔘 Looking for search button...")
+            search_button = await self.tab.select('button[type="submit"][aria-label="Search"]')
+
+            if not search_button:
+                self.logger.error("❌ Could not find search button")
+                return False
+
+            self.logger.info("✅ Found search button, clicking...")
+            await search_button.click()
+
+            # Wait for navigation/results to load
+            self.logger.info("⏳ Waiting for search results to load...")
+            await asyncio.sleep(3)
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"❌ Error performing interactive search: {e}")
+            return False
+
     async def _search_and_extract_results(self, query: str) -> List[Dict]:
         """
         Perform search and extract result links.
@@ -283,28 +439,36 @@ class JobBoardFinder:
         results = []
         retry_count = 0
 
+        # per-query hard timeout (configurable, fallback to 90s - increased for interactive search)
+        per_query_timeout = self.config.get('search_engine', {}).get('per_query_timeout_seconds', 90)
+        query_start = time.time()
+
         while retry_count <= self.config['search_engine']['rate_limit']['max_retries']:
+            # stop if overall per-query timeout exceeded
+            if time.time() - query_start > per_query_timeout:
+                self.logger.error(f"⏰ Query timeout exceeded ({per_query_timeout}s) for query: {query}")
+                break
+
             try:
                 # Rate limit
                 await self._rate_limit()
 
-                # Build search URL
-                search_url = self._build_search_url(query)
-                self.logger.info(f"📍 Search URL: {search_url}")
+                # Use interactive search instead of direct URL navigation
+                search_success = await self._perform_interactive_search(query)
 
-                # Navigate to search results
-                self.logger.info("🌐 Navigating to search page...")
-                await self.tab.get(search_url)
-                await wait_for_load(self.tab, timeout=3000)
+                if not search_success:
+                    self.logger.error("❌ Interactive search failed")
+                    retry_count += 1
+                    continue
 
                 # Get page info
                 page_url = await self.tab.evaluate('window.location.href')
                 page_title = await self.tab.evaluate('document.title')
-                self.logger.info(f"✅ Page loaded successfully")
-                self.logger.info(f"   Final URL: {page_url}")
+                self.logger.info(f"✅ Search submitted successfully")
+                self.logger.info(f"   Current URL: {page_url}")
                 self.logger.info(f"   Page title: {page_title}")
 
-                # Check for 429 error
+                # Check for 429
                 if await self._check_for_429():
                     self.logger.warning("⚠️  Detected 429 error on page")
                     await self._save_debug_html(f"429_error_{int(time.time())}", "429 rate limit page")
@@ -314,128 +478,127 @@ class JobBoardFinder:
                     else:
                         break
 
-                # Wait for results to load
-                # Mullvad/SearXNG uses different selectors based on the search engine
-                result_selectors = [
-                    '.result',
-                    '.result-default',
-                    'article.result',
-                    '.search-result',
-                    '#urls .result'
-                ]
-
-                self.logger.info("🔍 Testing result selectors...")
-
-                # Try to find results with different selectors
-                results_found = False
-                successful_selector = None
-                for selector in result_selectors:
-                    self.logger.info(f"   Trying selector: '{selector}'")
-                    if await wait_for_selector(self.tab, selector, timeout=5000):
-                        # Count how many elements match
-                        count = await self.tab.evaluate(f'document.querySelectorAll("{selector}").length')
-                        self.logger.info(f"   ✅ Found {count} elements matching '{selector}'")
-                        results_found = True
-                        successful_selector = selector
-                        break
-                    else:
-                        self.logger.info(f"   ❌ No elements found for '{selector}'")
-
-                if not results_found:
-                    self.logger.error(f"❌ SELECTOR FAILURE: No results found for query")
-                    self.logger.error(f"   Tried selectors: {', '.join(result_selectors)}")
-                    self.stats['selector_failures'] += 1
-
-                    # Save debug files
+                # Wait for results to be dynamically rendered
+                if not await self._wait_for_results_rendered(wait_seconds=5):
+                    self.logger.error("❌ Results were not found after waiting")
                     timestamp = int(time.time())
-                    await self._save_debug_html(f"selector_fail_{timestamp}", f"No selectors matched for query: {query}")
-                    await self._save_debug_screenshot(f"selector_fail_{timestamp}")
+                    await self._save_debug_html(f"render_timeout_{timestamp}", f"Results not rendered for: {query}")
+                    await self._save_debug_screenshot(f"render_timeout_{timestamp}")
+                    retry_count += 1
+                    continue
 
-                    # Log page structure for debugging
-                    body_structure = await self.tab.evaluate('''
-                        () => {
-                            const body = document.body;
-                            const classes = Array.from(body.querySelectorAll('[class]')).map(el => el.className).slice(0, 20);
-                            const ids = Array.from(body.querySelectorAll('[id]')).map(el => el.id).slice(0, 20);
-                            return {
-                                classes: [...new Set(classes)],
-                                ids: [...new Set(ids)]
-                            };
-                        }
-                    ''')
-                    self.logger.error(f"   Page classes found: {body_structure.get('classes', [])[:10]}")
-                    self.logger.error(f"   Page IDs found: {body_structure.get('ids', [])[:10]}")
-                    break
+                # Extract results from article elements (Leta uses <article> for each result)
+                self.logger.info("🔍 Extracting results from rendered page...")
 
-                self.logger.info(f"🎯 Extracting results using selector: '{successful_selector}'")
+                # Use Python HTML parsing instead of JavaScript extraction
+                try:
+                    from bs4 import BeautifulSoup
 
-                # Extract result data
-                results_data = await self.tab.evaluate('''
-                    () => {
-                        const results = [];
-                        const resultElements = document.querySelectorAll('.result, .result-default, article.result, .search-result');
+                    # Get the page HTML
+                    html_content = await self.tab.get_content()
+                    soup = BeautifulSoup(html_content, 'html.parser')
 
-                        resultElements.forEach((elem, index) => {
-                            try {
-                                const linkElem = elem.querySelector('a[href], h3 a, h4 a, .result-link');
-                                if (!linkElem) {
-                                    console.log('No link found in result', index);
-                                    return;
-                                }
+                    # Find all article elements
+                    articles = soup.find_all('article')
+                    self.logger.info(f"   Found {len(articles)} article elements on page")
 
-                                const url = linkElem.href;
-                                const title = linkElem.textContent || linkElem.innerText || '';
+                    results_data = []
+                    for i, article in enumerate(articles):
+                        try:
+                            # Find the first link in the article
+                            link = article.find('a', href=True)
+                            if not link or not link.get('href'):
+                                self.logger.warning(f"   ✗ Article {i}: no link found")
+                                continue
 
-                                // Try to find snippet/description
-                                let snippet = '';
-                                const snippetElem = elem.querySelector('.content, .result-content, .result-description, p');
-                                if (snippetElem) {
-                                    snippet = snippetElem.textContent || snippetElem.innerText || '';
-                                }
+                            # Get URL
+                            url = link.get('href')
+                            if not url.startswith('http'):
+                                self.logger.warning(f"   ✗ Article {i}: invalid URL: {url}")
+                                continue
 
-                                results.push({
-                                    url: url,
-                                    title: title.trim(),
-                                    snippet: snippet.trim()
-                                });
-                            } catch (e) {
-                                console.error('Error extracting result:', e);
-                            }
-                        });
+                            # Get title from h3
+                            h3 = article.find('h3')
+                            title = h3.get_text(strip=True) if h3 else ''
 
-                        return results;
-                    }
-                ''')
+                            # Get snippet from p.result__body
+                            snippet_p = article.find('p', class_='result__body')
+                            snippet = snippet_p.get_text(strip=True) if snippet_p else ''
 
-                if results_data:
+                            results_data.append({
+                                'url': url.strip(),
+                                'title': title[:200] if title else '',
+                                'snippet': snippet[:500] if snippet else ''
+                            })
+                            self.logger.info(f"   ✓ Extracted result {i+1}: {title[:50]}...")
+
+                        except Exception as e:
+                            self.logger.warning(f"   ✗ Error extracting article {i}: {e}")
+                            continue
+
+                    self.logger.info(f"   Successfully extracted {len(results_data)} results from {len(articles)} articles")
+
+                except ImportError:
+                    self.logger.error("   BeautifulSoup4 not installed. Please install with: pip install beautifulsoup4")
+                    results_data = []
+                except Exception as e:
+                    self.logger.error(f"   Error during extraction: {e}")
+                    results_data = []
+
+                if results_data and len(results_data) > 0:
                     results = results_data
                     self.stats['total_results_found'] += len(results)
                     self.logger.info(f"✅ Extracted {len(results)} results")
 
-                    # Log each result briefly
                     for i, result in enumerate(results, 1):
                         domain = self._extract_domain(result['url'])
                         self.logger.info(f"   [{i}] {domain}")
                         self.logger.info(f"       URL: {result['url'][:80]}{'...' if len(result['url']) > 80 else ''}")
                         self.logger.info(f"       Title: {result['title'][:80]}{'...' if len(result['title']) > 80 else ''}")
-                else:
-                    self.logger.warning(f"⚠️  No results extracted (empty results array)")
 
-                break  # Success, exit retry loop
+                    # success, break retry loop
+                    break
+                else:
+                    self.logger.warning("⚠️  No results extracted (empty results array)")
+                    self.stats['selector_failures'] += 1
+                    timestamp = int(time.time())
+                    await self._save_debug_html(f"no_results_{timestamp}", f"No results extracted for: {query}")
+                    await self._save_debug_screenshot(f"no_results_{timestamp}")
+
+                    # Try to collect page structure for debugging
+                    try:
+                        body_structure = await self.tab.evaluate('''() => {
+                            const body = document.body;
+                            const classes = Array.from(body.querySelectorAll('[class]')).map(el => el.className).slice(0, 20);
+                            const ids = Array.from(body.querySelectorAll('[id]')).map(el => el.id).slice(0, 20);
+                            const articles = document.querySelectorAll('article').length;
+                            const links = document.querySelectorAll('a[href^="http"]').length;
+                            return { classes: [...new Set(classes)], ids: [...new Set(ids)], articles, links };
+                        }''')
+                        self.logger.error(f"   Page has {body_structure.get('articles', 0)} articles, {body_structure.get('links', 0)} http links")
+                        self.logger.error(f"   Page classes: {body_structure.get('classes', [])[:5]}")
+                        self.logger.error(f"   Page IDs: {body_structure.get('ids', [])[:5]}")
+                    except Exception as e:
+                        self.logger.error(f"   Could not extract page structure: {e}")
+
+                    # Retry with next iteration
+                    retry_count += 1
+                    continue
 
             except Exception as e:
-                self.logger.error(f"❌ EXCEPTION during search for '{query}'", exc_info=True)
-                # Save debug info on exception
+                self.logger.error(f"❌ EXCEPTION during search for '{query}': {e}", exc_info=True)
                 try:
                     timestamp = int(time.time())
                     await self._save_debug_html(f"exception_{timestamp}", f"Exception during search: {str(e)}")
                     await self._save_debug_screenshot(f"exception_{timestamp}")
-                except:
+                except Exception:
                     pass
                 break
 
         self.logger.info(f"📊 Search complete: {len(results)} results to process")
         return results
+
+
 
     def _analyze_job_board(self, url: str, title: str, snippet: str) -> Dict:
         """Analyze a URL to determine if it's a job board and extract metadata."""
@@ -488,6 +651,406 @@ class JobBoardFinder:
             'indicators': indicators,
             'discovered_at': datetime.now().isoformat(),
         }
+
+    async def _score_job_board_page(self) -> Dict:
+        """
+        Score the current page based on job board indicators.
+        Returns dict with score, job_count, has_pagination, and other metadata.
+        """
+        try:
+            from bs4 import BeautifulSoup
+
+            # Get page HTML
+            html_content = await self.tab.get_content()
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            score = 0.0
+            job_count = 0
+            has_pagination = False
+
+            # Check for pagination indicators
+            pagination_selectors = [
+                'nav[aria-label*="pagination"]',
+                'nav[aria-label*="Pagination"]',
+                '.pagination',
+                'ul.pagination',
+                'div.pagination',
+                'a[aria-label*="next page"]',
+                'a[aria-label*="Next page"]',
+                'button[aria-label*="next"]',
+                'a:contains("Next")',
+                'a:contains("››")',
+                'span:contains("Page")',
+            ]
+
+            for selector in pagination_selectors:
+                if ':contains' not in selector:
+                    if soup.select(selector):
+                        has_pagination = True
+                        score += 2.0
+                        break
+
+            # Try to find job count from text
+            body_text = soup.get_text()
+            import re
+
+            # Look for patterns like "Found X jobs", "X jobs", "Showing X of Y", etc.
+            job_count_patterns = [
+                r'(?:found|showing)\s+(\d+)\s+(?:job|position|opening|career|opportunit)',
+                r'(\d+)\s+(?:job|position|opening|career|opportunit)(?:s)?\s+(?:found|available)',
+                r'(?:page\s+\d+\s+of\s+\d+)',
+            ]
+
+            for pattern in job_count_patterns:
+                match = re.search(pattern, body_text.lower())
+                if match:
+                    try:
+                        count = int(match.group(1))
+                        job_count = count
+                        score += min(count / 10, 5.0)  # Cap at 5 points
+                        break
+                    except (ValueError, IndexError):
+                        pass
+
+            # Count visible job listing elements
+            job_listing_selectors = [
+                '[data-testid*="job"]',
+                '[class*="job-listing"]',
+                '[class*="job-card"]',
+                '[class*="job_card"]',
+                '[class*="jobCard"]',
+                'article[class*="job"]',
+                'div[class*="job-item"]',
+                'li[class*="job"]',
+                '.job',
+                '[id*="job-"]',
+            ]
+
+            visible_jobs = 0
+            for selector in job_listing_selectors:
+                elements = soup.select(selector)
+                if len(elements) > visible_jobs:
+                    visible_jobs = len(elements)
+
+            # Score based on visible job elements
+            if visible_jobs >= self.config['validation']['min_job_listings']:
+                score += min(visible_jobs, 10.0)  # Cap at 10 points
+
+            self.logger.debug(f"      Page score: {score:.1f} (pagination={has_pagination}, job_count={job_count}, visible={visible_jobs})")
+
+            return {
+                'score': score,
+                'job_count': job_count,
+                'has_pagination': has_pagination,
+                'visible_job_elements': visible_jobs
+            }
+
+        except Exception as e:
+            self.logger.debug(f"      Error scoring page: {e}")
+            return {
+                'score': 0.0,
+                'job_count': 0,
+                'has_pagination': False,
+                'visible_job_elements': 0
+            }
+
+    async def _try_url_patterns(self, initial_url: str) -> Optional[Dict]:
+        """
+        Try common URL patterns to find the main job board page.
+        Returns dict with best_url and metadata, or None if original is best.
+        """
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(initial_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+        # Generate candidate URLs from config patterns
+        patterns = self.config['validation']['url_patterns']
+        candidates = [initial_url]  # Start with original
+
+        # Add pattern-based URLs
+        for pattern in patterns:
+            candidate = base_url + pattern
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        # Add URL variations
+        # Remove query params
+        if parsed.query:
+            no_query = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+            if no_query not in candidates:
+                candidates.append(no_query)
+
+        # Try parent path
+        path_parts = parsed.path.rstrip('/').split('/')
+        if len(path_parts) > 2:  # Has more than just /something
+            parent_path = '/'.join(path_parts[:-1]) + '/'
+            parent_url = base_url + parent_path
+            if parent_url not in candidates:
+                candidates.append(parent_url)
+
+        # Try base domain
+        if base_url not in candidates:
+            candidates.append(base_url)
+
+        # Limit to max_patterns
+        max_patterns = self.config['validation']['max_patterns_per_board']
+        candidates = candidates[:max_patterns]
+
+        self.logger.info(f"   📋 Trying {len(candidates)} URL patterns...")
+
+        # Extract domain for adaptive rate limiting
+        domain = parsed.netloc.lower().replace('www.', '')
+
+        best_result = None
+        best_score = 0.0
+
+        for i, url in enumerate(candidates):
+            try:
+                # Adaptive rate limit between requests (0.5s initially, doubles on errors up to 30s)
+                if i > 0:
+                    await self._adaptive_rate_limit(domain)
+
+                self.logger.debug(f"      Testing: {url}")
+
+                # Navigate to URL with timeout
+                timeout = self.config['validation']['timeout_per_url']
+                try:
+                    await asyncio.wait_for(self.tab.get(url), timeout=timeout)
+                    await wait_for_load(self.tab)
+
+                    # Check for 404 or 429 errors
+                    status_code = None
+                    try:
+                        # Try to detect error pages
+                        title = await self.tab.evaluate('document.title')
+                        body_text = await self.tab.evaluate('document.body?.innerText || ""')
+
+                        if '404' in title or '404' in body_text[:200]:
+                            self.logger.debug(f"      🚫 404 Not Found: {url}")
+                            self._increase_domain_delay(domain, "404")
+                            continue
+                        elif '429' in title or 'too many requests' in body_text.lower()[:500]:
+                            self.logger.info(f"      ⚠️  429 Rate Limit: {url}")
+                            self._increase_domain_delay(domain, "429")
+                            continue
+                    except Exception:
+                        pass  # Continue if we can't check status
+
+                except asyncio.TimeoutError:
+                    self.logger.debug(f"      ⏱️  Timeout loading {url}")
+                    self._increase_domain_delay(domain, "timeout")
+                    continue
+
+                # Score the page
+                page_score = await self._score_job_board_page()
+
+                # Success! Can reset delay on next iteration
+                if page_score['score'] > 0:
+                    self._reset_domain_delay(domain)
+
+                if page_score['score'] > best_score:
+                    best_score = page_score['score']
+                    best_result = {
+                        'url': url,
+                        'method': f"pattern_{url.replace(base_url, '')}",
+                        **page_score
+                    }
+                    self.logger.info(f"      ✨ New best: {url} (score={best_score:.1f})")
+
+            except Exception as e:
+                self.logger.debug(f"      ❌ Error testing {url}: {e}")
+                self._increase_domain_delay(domain, "exception")
+                continue
+
+        return best_result
+
+    async def _spider_menu_links(self, base_url: str) -> List[str]:
+        """
+        Extract job-related links from the site's main navigation menu.
+        Returns list of candidate URLs to check.
+        """
+        try:
+            from bs4 import BeautifulSoup
+            from urllib.parse import urljoin
+
+            # Navigate to base URL
+            await self.tab.get(base_url)
+            await wait_for_load(self.tab)
+
+            # Get page HTML
+            html_content = await self.tab.get_content()
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # Find navigation elements
+            nav_selectors = [
+                'nav',
+                'header nav',
+                '[role="navigation"]',
+                '.nav',
+                '.navigation',
+                '.menu',
+                '#menu',
+                'header',
+            ]
+
+            menu_links = []
+            job_keywords = ['job', 'career', 'work', 'employ', 'opportunity', 'hiring', 'opening', 'position', 'join']
+
+            for selector in nav_selectors:
+                nav_elements = soup.select(selector)
+                for nav in nav_elements:
+                    # Find all links in this nav element
+                    links = nav.find_all('a', href=True)
+                    for link in links:
+                        href = link.get('href')
+                        text = link.get_text(strip=True).lower()
+
+                        # Check if link text or href contains job keywords
+                        if any(keyword in text or keyword in href.lower() for keyword in job_keywords):
+                            # Make absolute URL
+                            absolute_url = urljoin(base_url, href)
+                            if absolute_url not in menu_links:
+                                menu_links.append(absolute_url)
+                                self.logger.debug(f"      Found menu link: {text} -> {absolute_url}")
+
+            self.logger.info(f"   📋 Found {len(menu_links)} job-related menu links")
+            return menu_links
+
+        except Exception as e:
+            self.logger.debug(f"   Error spidering menu links: {e}")
+            return []
+
+    async def _find_main_job_board_page(self, initial_url: str) -> Dict:
+        """
+        Find the main job board listing page using two-stage validation.
+        Returns dict with validation results.
+        """
+        from urllib.parse import urlparse
+
+        domain = urlparse(initial_url).netloc
+        self.logger.info(f"🔍 Validating: {domain}")
+        self.logger.info(f"   Original URL: {initial_url}")
+
+        # Stage 1: Try URL patterns
+        self.logger.info(f"   🎯 Stage 1: Pattern-based URL discovery")
+        best_result = await self._try_url_patterns(initial_url)
+
+        # Stage 2: Spider menu links if Stage 1 didn't find good page
+        if self.config['validation']['spider_menu'] and (
+            not best_result or best_result['score'] < self.config['validation']['min_job_listings']
+        ):
+            self.logger.info(f"   🕷️  Stage 2: Spidering menu links")
+            base_url = f"{urlparse(initial_url).scheme}://{urlparse(initial_url).netloc}"
+            menu_links = await self._spider_menu_links(base_url)
+
+            # Test menu links with adaptive rate limiting
+            domain = urlparse(initial_url).netloc.lower().replace('www.', '')
+            for link in menu_links[:5]:  # Limit to first 5 menu links
+                try:
+                    await self._adaptive_rate_limit(domain)
+
+                    timeout = self.config['validation']['timeout_per_url']
+                    await asyncio.wait_for(self.tab.get(link), timeout=timeout)
+                    await wait_for_load(self.tab)
+
+                    page_score = await self._score_job_board_page()
+
+                    # Success! Reset delay
+                    if page_score['score'] > 0:
+                        self._reset_domain_delay(domain)
+
+                    if not best_result or page_score['score'] > best_result['score']:
+                        link_text = link.split('/')[-1] or 'root'
+                        best_result = {
+                            'url': link,
+                            'method': f"menu_link_{link_text}",
+                            **page_score
+                        }
+                        self.logger.info(f"      ✨ New best from menu: {link} (score={best_result['score']:.1f})")
+
+                except asyncio.TimeoutError:
+                    self.logger.debug(f"      ⏱️  Timeout checking menu link: {link}")
+                    self._increase_domain_delay(domain, "timeout")
+                    continue
+                except Exception as e:
+                    self.logger.debug(f"      ❌ Error checking menu link {link}: {e}")
+                    self._increase_domain_delay(domain, "exception")
+                    continue
+
+        # Determine validation status
+        if best_result and best_result['url'] != initial_url:
+            validation_status = 'validated'
+            self.logger.info(f"   ✅ Found better URL: {best_result['url']}")
+            self.logger.info(f"      Method: {best_result['method']}, Score: {best_result['score']:.1f}")
+        elif best_result:
+            validation_status = 'needs_review'
+            self.logger.info(f"   ⚠️  Original URL is best (score={best_result['score']:.1f})")
+        else:
+            validation_status = 'needs_review'
+            best_result = {
+                'url': initial_url,
+                'method': 'original',
+                'score': 0.0,
+                'job_count': 0,
+                'has_pagination': False,
+                'visible_job_elements': 0
+            }
+            self.logger.info(f"   ⚠️  Could not validate, keeping original")
+
+        return {
+            'url': best_result['url'],
+            'original_url': initial_url,
+            'validation_status': validation_status,
+            'job_count': best_result.get('job_count', 0),
+            'has_pagination': best_result.get('has_pagination', False),
+            'visible_job_elements': best_result.get('visible_job_elements', 0),
+            'discovery_method': best_result.get('method', 'original')
+        }
+
+    async def validate_discovered_boards(self):
+        """
+        Validate discovered boards by finding their main job board listing pages.
+        Updates self.discovered_boards with validation results.
+        """
+        if not self.config['validation']['enabled']:
+            self.logger.info("⚠️  Validation disabled in config")
+            return
+
+        self.logger.info("")
+        self.logger.info("="*70)
+        self.logger.info("🔍 VALIDATION PHASE: Finding main job board pages")
+        self.logger.info("="*70)
+        self.logger.info(f"Validating {len(self.discovered_boards)} discovered boards...")
+        self.logger.info("")
+
+        for i, (domain, board) in enumerate(list(self.discovered_boards.items()), 1):
+            self.logger.info(f"[{i}/{len(self.discovered_boards)}] Validating {domain}")
+
+            try:
+                validation_result = await self._find_main_job_board_page(board['url'])
+
+                # Update board entry with validation results
+                self.discovered_boards[domain].update(validation_result)
+
+            except Exception as e:
+                self.logger.error(f"   ❌ Validation failed for {domain}: {e}")
+                # Mark as needs review on error
+                self.discovered_boards[domain]['validation_status'] = 'needs_review'
+                self.discovered_boards[domain]['original_url'] = board['url']
+
+            self.logger.info("")
+
+        # Summary
+        validated = sum(1 for b in self.discovered_boards.values() if b.get('validation_status') == 'validated')
+        needs_review = sum(1 for b in self.discovered_boards.values() if b.get('validation_status') == 'needs_review')
+
+        self.logger.info("="*70)
+        self.logger.info("📊 VALIDATION SUMMARY")
+        self.logger.info("="*70)
+        self.logger.info(f"   ✅ Validated (found better URL): {validated}")
+        self.logger.info(f"   ⚠️  Needs review: {needs_review}")
+        self.logger.info("")
 
     async def discover_job_boards(self, max_queries: int = None) -> Dict[str, Dict]:
         """
@@ -614,6 +1177,10 @@ class JobBoardFinder:
 
                 self.stats['queries_processed'] += 1
 
+            # Validation phase: Find main job board pages
+            if self.discovered_boards:
+                await self.validate_discovered_boards()
+
             return self.discovered_boards
 
         finally:
@@ -658,8 +1225,8 @@ async def main():
     finder = JobBoardFinder()
 
     try:
-        # Discover job boards (limit to 5 queries for testing)
-        boards = await finder.discover_job_boards(max_queries=5)
+        # Discover job boards (limit to 1 query for testing)
+        boards = await finder.discover_job_boards(max_queries=1)
 
         # Save results
         finder.save_results()
